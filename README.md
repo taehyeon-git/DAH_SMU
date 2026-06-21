@@ -1,4 +1,4 @@
-# DAH 2026 - Defense AI Cyber Security Hackathon
+# DAH 2026 - UAV/UGV 전술통신 시뮬레이션
 
 > **예선 마감**: 2026.07.10 (금) 23:59 KST  
 > **도메인**: UAV / UGV  
@@ -9,9 +9,19 @@
 
 ## 프로젝트 개요
 
-위성 네트워크 기반 UAV/UGV 합동 운용 환경에서  
-**AI 공격 에이전트(Attack AI)** 와 **AI 방어 에이전트(Defense AI)** 가  
-실시간으로 공방전을 벌이는 시스템.
+DAH 대회 준비를 위한 **UAV/UGV 전술 무인체계 통신 구조 시뮬레이션**입니다.
 
-공격 AI는 MAVLink 취약점, 위성 통신망, UAV/UGV 제어 체계의 취약점을 탐색하고 공격을 자율 수행한다.  
-방어 AI는 이상 탐지, 위협 분류, 대응을 자율 실행하여 가용성(Availability)을 유지한다.
+LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 분야와  
+한화시스템의 C5I, TICN, 군 위성통신체계-II, 전술데이터링크 개념을 참고합니다.
+
+현재 대시보드는 C2, Mission Control, UAV, UGV, EW UAV, TICN/SATCOM 링크 상태를 움직이는 전장 시뮬레이션 형태로 시각화합니다.
+
+## 실행
+
+```powershell
+docker compose up -d --build dah-dashboard
+```
+
+```text
+http://localhost:8081
+```
