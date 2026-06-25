@@ -63,13 +63,35 @@ Autopilot / Flight Controller Vehicle Controller
 
 Recon, Executor, Defense는 별도의 직접 공격/방어 실습 레이어로 유지합니다.
 
+## 구현 범위
+
+본 프로젝트는 실제 TICN/SATCOM 또는 실제 MAVLink/ROS2 네트워크를 완전 구현한 것이 아니라,
+UAV/UGV 전술 통신 구조를 학습하고 시연하기 위한 Docker 기반 시뮬레이션이다.
+
+현재 Telemetry는 MAVLink/ROS2/MQTT 메시지 구조를 모사한 JSON 기반 데이터로 생성되며,
+Tactical Router는 이를 Mission Control, Dashboard, Telemetry Collector로 분배한다.
+
+Command는 Mission Control 또는 GCS에서 생성되어 Tactical Router를 통해 UAV/UGV 시뮬레이터로 전달되며,
+수신된 명령은 이후 Telemetry 상태 변화로 반영된다.
+
+##
+- UAV / UGV는 상태 정보를 생성한다.
+- Companion / Onboard Computer는 상태 정보를 수집한다.
+- Tactical Router는 Telemetry와 Command를 중계한다.
+- Mission Control / C2 Server는 상태를 판단하고 Command를 생성한다.
+- GCS는 운용자가 상태를 확인하고 명령을 입력하는 지상통제소이다.
+- Dashboard는 상태, 링크, 로그, Agent 판단 결과를 시각화한다.
+- Telemetry Collector는 Raw 로그를 수집한다.
+- Log DB는 통신 및 판단 이력을 저장한다.
+- AI Agent는 로그와 상태 정보를 기반으로 판단 흐름을 생성한다.
+
 ## 실행
 
-\`\`\`powershell
+```powershell
 docker compose up -d --build dah-dashboard
-\`\`\`
+```
 
-\`\`\`text
+```text
 Dashboard: http://localhost:8081
 Mission Control API: http://localhost:8082/api/dashboard
-\`\`\`
+```
