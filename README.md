@@ -74,7 +74,8 @@ Tactical Router는 이를 Mission Control, Dashboard, Telemetry Collector로 분
 Command는 Mission Control 또는 GCS에서 생성되어 Tactical Router를 통해 UAV/UGV 시뮬레이터로 전달되며,
 수신된 명령은 이후 Telemetry 상태 변화로 반영된다.
 
-##
+## 시스템 구성 요소
+
 - UAV / UGV는 상태 정보를 생성한다.
 - Companion / Onboard Computer는 상태 정보를 수집한다.
 - Tactical Router는 Telemetry와 Command를 중계한다.
