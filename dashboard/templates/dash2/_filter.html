@@ -1,0 +1,20 @@
+<!-- 대시보드2: 필터바 -->
+<div class="card" style="flex-shrink:0; padding:10px 14px;">
+  <div class="f-bar">
+    <span class="f-lbl">시간 범위</span>
+    <select class="f-sel"><option>최근 15분</option><option>최근 1시간</option><option>최근 6시간</option><option>전체</option></select>
+    <span class="f-lbl">대상</span>
+    <select class="f-sel"><option>전체</option><option>UAV-001</option><option>UGV-001</option></select>
+    <span class="f-lbl">로그 유형</span>
+    <select class="f-sel"><option>전체</option><option>Telemetry</option><option>Command</option><option>Agent</option></select>
+    <span class="f-lbl">프로토콜</span>
+    <select class="f-sel"><option>전체</option><option>MAVLink</option><option>ROS2_JSON</option><option>MQTT</option></select>
+    <span class="f-lbl">상태</span>
+    <select class="f-sel"><option>전체</option><option>정상</option><option>경고</option><option>오류</option></select>
+    <input class="f-search" placeholder="검색어 입력 (명령, 메시지, 데이터...)">
+    <button class="f-btn">초기화</button>
+    <button class="f-btn-apply">필터 적용</button>
+    <div class="d2-stat"><div class="lbl">Telemetry 수신률</div><div class="val" id="d2-telem-rate">98.7%</div></div>
+    <div class="d2-stat"><div class="lbl">Command ACK 비율</div><div class="val" id="d2-ack-rate">96.4%</div></div>
+  </div>
+</div>

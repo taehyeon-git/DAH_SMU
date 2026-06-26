@@ -1,0 +1,126 @@
+<!-- 대시보드1: MAP + Payload Video -->
+<div class="row-top">
+
+  <!-- 지도 -->
+  <div class="card">
+    <div class="map-header">
+      <div class="card-title" style="margin-bottom:0">MAP / 트랙 뷰</div>
+      <div class="map-tabs">
+        <button class="active" onclick="setTab(this)">지도</button>
+        <button onclick="setTab(this)">위성</button>
+      </div>
+    </div>
+    <div class="map-svg-wrap">
+      <div id="leaflet-map"></div>
+      <div class="map-info-panel">
+        <div class="ip-title ip-uav">UAV-001</div>
+        <table>
+          <tr><td>프로토콜</td><td><span class="badge b-mav" style="font-size:9px">MAVLink/UDP</span></td></tr>
+          <tr><td>모드</td><td>AUTO</td></tr>
+          <tr><td>위도</td><td>37.568512</td></tr>
+          <tr><td>경도</td><td>126.978012</td></tr>
+          <tr><td>고도</td><td>120.5 m</td></tr>
+          <tr><td>속도</td><td>15.2 m/s</td></tr>
+          <tr><td>방향</td><td>084°</td></tr>
+          <tr><td>배터리</td><td><div class="batt"><div class="batt-bar"><span style="width:67%"></span></div>67%</div></td></tr>
+          <tr><td>연결</td><td><div class="conn"><span class="conn-d"></span>연결됨</div></td></tr>
+        </table>
+        <div class="ip-title ip-ugv" style="margin-top:8px">UGV-001</div>
+        <table>
+          <tr><td>프로토콜</td><td><span class="badge b-ros" style="font-size:9px">ROS2/MQTT</span></td></tr>
+          <tr><td>모드</td><td>AUTO</td></tr>
+          <tr><td>위치 X/Y</td><td>31.2 / 15.8 m</td></tr>
+          <tr><td>속도</td><td>2.1 m/s</td></tr>
+          <tr><td>방향</td><td>192°</td></tr>
+          <tr><td>배터리</td><td><div class="batt"><div class="batt-bar"><span style="width:74%"></span></div>74%</div></td></tr>
+          <tr><td>CPU</td><td>32%</td></tr>
+          <tr><td>연결</td><td><div class="conn"><span class="conn-d"></span>연결됨</div></td></tr>
+        </table>
+      </div>
+      <div class="map-legend">
+        <div class="leg-row"><div class="leg-line" style="background:#2563eb"></div>UAV 경로</div>
+        <div class="leg-row"><div class="leg-line" style="background:#16a34a"></div>UGV 경로</div>
+        <div class="leg-row"><div class="leg-dot"></div>Waypoint</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Payload Video -->
+  <div class="card">
+    <div class="map-header">
+      <div class="card-title" style="margin-bottom:0">Payload Video</div>
+      <div class="map-tabs">
+        <button class="active" onclick="switchCam(this,'uav')">UAV-001 CAM</button>
+        <button onclick="switchCam(this,'ugv')">UGV-001 CAM</button>
+      </div>
+    </div>
+    <div class="vid-wrap">
+      <!-- UAV 카메라 -->
+      <div id="cam-uav" class="cam-layer">
+        <div id="cam-uav-map" class="cam-map"></div>
+        <div class="cam-hud">
+          <div class="cam-hud-tl">
+            <div>UAV-001 / CAM-1 / EO</div>
+            <div id="hud-alt">ALT: 120.5m  SPD: 15.2m/s</div>
+            <div>HDG: 084°  PITCH: -8°</div>
+            <div>37.5685N  126.9780E</div>
+          </div>
+          <div class="cam-hud-tr">
+            <div id="hud-ts-uav">--:--:--</div>
+            <div>2026.06.25</div>
+            <div class="hud-rec">● REC</div>
+            <div>ZOOM ×2.0</div>
+          </div>
+          <div class="cam-hud-bl">
+            <div>BATT: 67%  LINK: TICN</div>
+            <div class="hud-warn">TGT LOCK</div>
+          </div>
+          <div class="cam-hud-br">
+            <div>MISSION: RECON</div>
+            <div>STATUS: AUTO</div>
+          </div>
+          <div class="cam-crosshair"><div class="ch-h"></div><div class="ch-v"></div></div>
+          <div class="cam-tgt"></div>
+          <div class="cam-corner cam-corner-tl"></div>
+          <div class="cam-corner cam-corner-tr"></div>
+          <div class="cam-corner cam-corner-bl"></div>
+          <div class="cam-corner cam-corner-br"></div>
+          <div class="cam-scanlines"></div>
+        </div>
+      </div>
+      <!-- UGV 카메라 -->
+      <div id="cam-ugv" class="cam-layer" style="display:none">
+        <div id="cam-ugv-map" class="cam-map"></div>
+        <div class="cam-hud">
+          <div class="cam-hud-tl">
+            <div>UGV-001 / CAM-F / EO-IR</div>
+            <div id="hud-spd">SPD: 2.1m/s  HDG: 192°</div>
+            <div>37.9010N  126.7920E</div>
+          </div>
+          <div class="cam-hud-tr">
+            <div id="hud-ts-ugv">--:--:--</div>
+            <div>2026.06.25</div>
+            <div class="hud-rec">● REC</div>
+            <div>ZOOM ×1.0</div>
+          </div>
+          <div class="cam-hud-bl">
+            <div>BATT: 74%  LINK: TICN/CNRS</div>
+            <div>MISSION: GROUND_RECON</div>
+          </div>
+          <div class="cam-hud-br">
+            <div>TERRAIN: URBAN</div>
+            <div>STATUS: AUTO</div>
+          </div>
+          <div class="cam-crosshair"><div class="ch-h"></div><div class="ch-v"></div></div>
+          <div class="cam-corner cam-corner-tl"></div>
+          <div class="cam-corner cam-corner-tr"></div>
+          <div class="cam-corner cam-corner-bl"></div>
+          <div class="cam-corner cam-corner-br"></div>
+          <div class="cam-scanlines"></div>
+        </div>
+      </div>
+      <div class="vid-live">● LIVE</div>
+    </div>
+  </div>
+
+</div>
