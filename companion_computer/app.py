@@ -1,41 +1,89 @@
 """
 Companion Computer — UAV 탑재 컴퓨터
-역할: Autopilot(FC)에서 MAVLink 수신 → JSON 변환 → Mission Control HTTP 전송
+역할: UAV FC MAVLink 수신 → JSON 변환 → Tactical Router UDP 전송
+      Router Command 수신 → MAVLink → UAV FC 전달
 """
 import json
 import os
+import socket
+import threading
 import time
-import urllib.request
 from pymavlink import mavutil
 
 MAVLINK_HOST = "0.0.0.0"
-MAVLINK_PORT = int(os.getenv("MAVLINK_PORT", "14550"))
-MISSION_URL  = os.getenv("MISSION_CONTROL_URL", "http://mission-control:8080")
+MAVLINK_PORT = int(os.getenv("MAVLINK_PORT",  "14550"))
+ROUTER_HOST  = os.getenv("ROUTER_HOST",  "tactical-router")
+ROUTER_PORT  = int(os.getenv("ROUTER_PORT",  "14555"))   # CC → Router 텔레메트리
+CMD_PORT     = int(os.getenv("CMD_PORT",  "14552"))       # Router → CC 명령 수신
+UAV_HOST     = os.getenv("UAV_HOST",  "172.20.0.10")
+UAV_CMD_PORT = int(os.getenv("UAV_CMD_PORT", "14551"))
 PLATFORM_ID  = "UAV-001"
+SYS_ID       = 1
 
 state = {}
+router_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
-def post_to_mission(payload):
-    data = json.dumps(payload).encode("utf-8")
-    req  = urllib.request.Request(
-        f"{MISSION_URL}/api/companion",
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def send_to_router(payload):
     try:
-        with urllib.request.urlopen(req, timeout=1.0):
-            pass
+        router_sock.sendto(json.dumps(payload).encode("utf-8"), (ROUTER_HOST, ROUTER_PORT))
     except Exception as e:
-        print(f"[CC] Mission Control 전송 실패: {e}")
+        print(f"[CC] Router 전송 실패: {e}")
+
+
+def listen_commands():
+    """Router → CC → UAV FC 명령 경로"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", CMD_PORT))
+    mav_fc = mavutil.mavlink_connection(
+        f"udpout:{UAV_HOST}:{UAV_CMD_PORT}",
+        source_system=255  # GCS SYS_ID로 위장
+    )
+    print(f"[CC] Command 수신 대기 → 포트 {CMD_PORT}")
+
+    while True:
+        data, addr = sock.recvfrom(4096)
+        try:
+            cmd = json.loads(data.decode())
+        except Exception:
+            continue
+
+        command = cmd.get("command", "")
+        src     = cmd.get("source", "?")
+        print(f"[CC] Command 수신 ← {src} ({addr[0]}): {command}")
+
+        if command == "LAND":
+            mav_fc.mav.command_long_send(
+                target_system=SYS_ID, target_component=1,
+                command=mavutil.mavlink.MAV_CMD_NAV_LAND,
+                confirmation=0,
+                param1=0, param2=0, param3=0, param4=0,
+                param5=0, param6=0, param7=0
+            )
+            print(f"[CC] MAVLink LAND → UAV FC {UAV_HOST}:{UAV_CMD_PORT}")
+
+        elif command == "RTB":
+            mav_fc.mav.command_long_send(
+                target_system=SYS_ID, target_component=1,
+                command=mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                confirmation=0,
+                param1=0, param2=0, param3=0, param4=0,
+                param5=0, param6=0, param7=0
+            )
+            print(f"[CC] MAVLink RTB → UAV FC {UAV_HOST}:{UAV_CMD_PORT}")
+
+        else:
+            print(f"[CC] 알 수 없는 명령: {command}")
 
 
 def main():
+    threading.Thread(target=listen_commands, daemon=True).start()
+
     mav = mavutil.mavlink_connection(f"udpin:{MAVLINK_HOST}:{MAVLINK_PORT}")
-    print(f"[CC] Companion Computer 시작")
-    print(f"[CC] MAVLink 수신 → {MAVLINK_HOST}:{MAVLINK_PORT}")
-    print(f"[CC] Mission Control → {MISSION_URL}/api/companion")
+    print("[CC] Companion Computer 시작")
+    print(f"[CC] MAVLink 수신 ← {MAVLINK_HOST}:{MAVLINK_PORT}  (UAV FC 브로드캐스트)")
+    print(f"[CC] Telemetry 전송 → {ROUTER_HOST}:{ROUTER_PORT}  (Tactical Router)")
+    print(f"[CC] Command 수신 → 포트 {CMD_PORT}  (Router → CC)")
     print("-" * 50)
 
     while True:
@@ -68,12 +116,13 @@ def main():
                     "platform_id":   PLATFORM_ID,
                     "platform_type": "UAV",
                     "message_type":  "telemetry",
-                    "source":        "companion_computer",
+                    "source":        "companion_computer/MAVLink",
                     "seq":           seq,
                     **state,
                     "timestamp": time.time(),
                 }
-                post_to_mission(payload)
+                send_to_router(payload)
+                print(f"[CC] → Router {ROUTER_HOST}:{ROUTER_PORT}  SEQ={seq}")
 
 
 if __name__ == "__main__":

@@ -3,20 +3,17 @@ services:
   # ── 송골매 UAV 시뮬레이터
   dah-uav:
     build:
-      context: .                          # DAH/ 루트 기준으로 빌드
-      dockerfile: simulator/uav/Dockerfile      # UAV용 Dockerfile 지정
+      context: .
+      dockerfile: uav/Dockerfile
     container_name: dah-uav
-    environment:
-      ROUTER_HOST: tactical-router
-      ROUTER_PORT: 14560
     depends_on:
-      - tactical-router
+      - dah-companion
     networks:
-      uav_net:
       dah-net:
         ipv4_address: 172.20.0.10         # UAV 고정 IP
 
   # ── Companion Computer (UAV 탑재 컴퓨터)
+  # MAVLink 수신(dah-net) → JSON 변환 → Tactical Router UDP(ops_net)
   dah-companion:
     build:
       context: .
@@ -24,20 +21,23 @@ services:
     container_name: dah-companion
     environment:
       MAVLINK_PORT: 14550
-      MISSION_CONTROL_URL: http://mission-control:8080
+      ROUTER_HOST: tactical-router
+      ROUTER_PORT: 14555
+      CMD_PORT: 14552
+      UAV_HOST: 172.20.0.10
+      UAV_CMD_PORT: 14551
     depends_on:
-      - dah-uav
-      - mission-control
+      - tactical-router
     networks:
       dah-net:
-        ipv4_address: 172.20.0.30
-      ops_net:
+        ipv4_address: 172.20.0.30         # dah-net: UAV MAVLink 수신
+      ops_net:                             # ops_net: Router로 텔레메트리 전달
 
   # ── UGV 시뮬레이터
   dah-ugv:
     build:
       context: .
-      dockerfile: simulator/ugv/Dockerfile
+      dockerfile: ugv/Dockerfile
     container_name: dah-ugv
     environment:
       ROUTER_HOST: tactical-router
@@ -50,19 +50,28 @@ services:
       dah-net:
         ipv4_address: 172.20.0.20
 
-  # ── TICN 전술 라우터 (UAV/UGV 텔레메트리 fan-out)
+  # ── TICN 전술 라우터
+  # CC(UAV) + UGV 텔레메트리 수신 → GCS / Mission Control / Dashboard / Collector fan-out
+  # GCS/MC Command 수신 → CC 전달
   tactical-router:
     build:
       context: .
       dockerfile: tactical_router/Dockerfile
     container_name: dah-tactical-router
     environment:
-      UAV_LISTEN_PORT: 14560
+      CC_LISTEN_PORT: 14555
       UGV_LISTEN_PORT: 14660
+      CMD_LISTEN_PORT: 14580
       MISSION_HOST: mission-control
       MISSION_PORT: 14540
       COLLECTOR_HOST: telemetry-collector
       COLLECTOR_PORT: 14541
+      GCS_HOST: dah-gcs
+      GCS_PORT: 14570
+      DASHBOARD_HOST: dah-dashboard
+      DASHBOARD_PORT: 14571
+      CC_CMD_HOST: dah-companion
+      CC_CMD_PORT: 14552
     networks:
       - uav_net
       - ops_net
@@ -71,7 +80,7 @@ services:
   mission-control:
     build:
       context: .
-      dockerfile: mission_control/Dockerfile
+      dockerfile: c2/mission_control/Dockerfile
     container_name: dah-mission-control
     ports:
       - "8082:8080"
@@ -89,60 +98,38 @@ services:
     networks:
       - ops_net
 
-  # ── 정찰 에이전트 (도청)
-  dah-recon:
-    profiles: ["cyber-lab"]
+  # ── GCS (Ground Control Station) — 신규
+  # Router로부터 텔레메트리 직수신 / Command → Router → CC → UAV FC
+  dah-gcs:
     build:
       context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-recon
+      dockerfile: gcs/Dockerfile
+    container_name: dah-gcs
+    environment:
+      LISTEN_PORT: 14570
+      ROUTER_HOST: tactical-router
+      ROUTER_CMD_PORT: 14580
+    ports:
+      - "8083:8080"
     depends_on:
-      - dah-uav                           # UAV 먼저 실행된 후 시작
+      - tactical-router
     networks:
-      dah-net:
-        ipv4_address: 172.20.0.40         # recon 고정 IP
+      - ops_net
 
-  # ── 공격 에이전트 (LAND 명령 주입)
-  dah-executor:
-    profiles: ["cyber-lab"]
-    build:
-      context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-executor
-    command: ["python", "executor.py"]    # recon.py 대신 executor.py 실행
-    depends_on:
-      - dah-uav
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.50         # executor 고정 IP
-
-  # ── 방어 에이전트 (탐지 + 차단)
-  dah-defense:
-    profiles: ["cyber-lab"]
-    build:
-      context: .
-      dockerfile: defense_agent/Dockerfile
-    container_name: dah-defense
-    depends_on:
-      - dah-uav                           # UAV 먼저 실행된 후 시작
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.60         # 방어 에이전트 고정 IP
-
-  # ── 대시보드 + GCS (통신 구조 시각화 / 지상통제소)
+  # ── 대시보드
   dah-dashboard:
     build:
       context: .
       dockerfile: dashboard/Dockerfile
     container_name: dah-dashboard
     depends_on:
-      - dah-uav
       - dah-ugv
       - tactical-router
       - mission-control
       - telemetry-collector
     environment:
       MISSION_CONTROL_URL: http://mission-control:8080
+      ROUTER_TELEMETRY_PORT: 14571
       UAV_HOST: 172.20.0.10
       UAV_CMD_PORT: 14551
       UGV_HOST: 172.20.0.20
@@ -154,6 +141,46 @@ services:
       dah-net:
         ipv4_address: 172.20.0.70
 
+  # ── 정찰 에이전트 (도청)
+  dah-recon:
+    profiles: ["cyber-lab"]
+    build:
+      context: .
+      dockerfile: attack_agent/Dockerfile
+    container_name: dah-recon
+    depends_on:
+      - dah-uav
+    networks:
+      dah-net:
+        ipv4_address: 172.20.0.40
+
+  # ── 공격 에이전트 (LAND 명령 주입)
+  dah-executor:
+    profiles: ["cyber-lab"]
+    build:
+      context: .
+      dockerfile: attack_agent/Dockerfile
+    container_name: dah-executor
+    command: ["python", "executor.py"]
+    depends_on:
+      - dah-uav
+    networks:
+      dah-net:
+        ipv4_address: 172.20.0.50
+
+  # ── 방어 에이전트 (탐지 + 차단)
+  dah-defense:
+    profiles: ["cyber-lab"]
+    build:
+      context: .
+      dockerfile: defense_agent/Dockerfile
+    container_name: dah-defense
+    depends_on:
+      - dah-uav
+    networks:
+      dah-net:
+        ipv4_address: 172.20.0.60
+
 # ── 가상 네트워크
 networks:
   uav_net:
@@ -164,4 +191,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24           # IP 대역 설정
+        - subnet: 172.20.0.0/24

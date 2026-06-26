@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY mission_control/app.py .
+COPY c2/mission_control/app.py .
 
 CMD ["python", "app.py"]

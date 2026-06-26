@@ -1,11 +1,35 @@
+import json
 import os
+import socket
+import threading
 import urllib.error
 import urllib.request
 from flask import Flask, jsonify, render_template
 
 app = Flask(__name__)
 
-MISSION_CONTROL_URL = os.getenv("MISSION_CONTROL_URL", "http://mission-control:8080")
+MISSION_CONTROL_URL   = os.getenv("MISSION_CONTROL_URL", "http://mission-control:8080")
+ROUTER_TELEMETRY_PORT = int(os.getenv("ROUTER_TELEMETRY_PORT", "14571"))
+
+# Router로부터 직접 수신한 플랫폼 상태
+router_platforms: dict = {}
+
+
+def _router_udp_listener():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", ROUTER_TELEMETRY_PORT))
+    print(f"[DASH] Router 직수신 대기 → UDP {ROUTER_TELEMETRY_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(8192)
+            payload = json.loads(data.decode())
+            pid = payload.get("platform_id", "UNKNOWN")
+            router_platforms[pid] = payload
+        except Exception:
+            pass
+
+
+threading.Thread(target=_router_udp_listener, daemon=True).start()
 
 
 TOPOLOGY = {
@@ -197,13 +221,22 @@ def topology():
 def live():
     dashboard = fetch_json("/api/dashboard")
     if dashboard is None:
+        # Mission Control 불가 시 Router 직수신 데이터로 fallback
         return jsonify({
             "status": "degraded",
-            "message": "mission-control unavailable",
-            "platforms": [],
+            "message": "mission-control unavailable (router direct)",
+            "platforms": list(router_platforms.values()),
             "events": [],
         })
-    return jsonify({"status": "ok", **dashboard})
+    # Mission Control 데이터 + Router 직수신 병합 (router 우선)
+    mc_platforms = {p["platform_id"]: p for p in dashboard.get("platforms", [])}
+    merged = {**mc_platforms, **router_platforms}
+    return jsonify({
+        "status": "ok",
+        **dashboard,
+        "platforms": list(merged.values()),
+        "router_direct": len(router_platforms),
+    })
 
 
 @app.get("/health")

@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # mock_uav.py 복사
-COPY simulator/uav/mock_uav.py .
+COPY uav/mock_uav.py .
 
 # 실행 명령어
 CMD ["python", "mock_uav.py"]
