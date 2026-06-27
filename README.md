@@ -58,10 +58,10 @@ LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 �
 ┌──────────────┴────────────────────────────────────────────────────────────────┐
 │ AI Attack Agent                                                               │
 │ - Auto attack event generation inside Docker virtual network                  │
-│ - Telemetry forgery / Command tampering / GPS anomaly injection                │
-│ - Comm delay / loss / block / manipulation events                              │
-│ - AI Defense Agent detection performance validation                            │
-│ * Operates only inside closed UAV/UGV domain virtual environment               │
+│ - Telemetry forgery / Command tampering / GPS anomaly injection               │
+│ - Comm delay / loss / block / manipulation events                             │
+│ - AI Defense Agent detection performance validation                           │
+│ * Operates only inside closed UAV/UGV domain virtual environment              │
 └───────────────────────────────────────────────────────────────────────────────┘
 
                      │ Tactical net data
@@ -86,7 +86,7 @@ LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 �
 │ - Tactical radio node                                                         │
 │ - Voice / data transceiver                                                    │
 │ - TICN access segment                                                         │
-│ - Tactical radio link simulation                                               │
+│ - Tactical radio link simulation                                              │
 └─────────────────────┬─────────────────────────────────────────────────────────┘
                       │ Report / Situation Data (down) / Command / Tasking (up)
                       ▼
@@ -103,11 +103,11 @@ LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 �
 
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │ Upper C2 / BMS Simulator                                                      │
-│ - Operational situation sharing                                                │
-│ - Target / coordinate sharing                                                  │
-│ - Surveillance zone assignment                                                 │
-│ - Mission change order / Higher command dissemination                          │
-│ * Does not command UAV/UGV directly -- converted to Commands via GCS           │
+│ - Operational situation sharing                                               │
+│ - Target / coordinate sharing                                                 │
+│ - Surveillance zone assignment                                                │
+│ - Mission change order / Higher command dissemination                         │
+│ * Does not command UAV/UGV directly -- converted to Commands via GCS          │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
