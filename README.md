@@ -17,98 +17,98 @@ LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 �
 ## 아키텍처
 
 ```text
-+------------------------------- UAV / UGV Asset Layer ------------------------------+
-|                                                                                   |
-|  +---------- UAV Simulator -----------+   +--------- UGV Simulator ----------+   |
-|  | - Autopilot / FC Logic             |   | - Vehicle Controller Logic       |   |
-|  | - MAVLink-like Telemetry / Command |   | - ROS2/MQTT-like Telemetry       |   |
-|  | - Payload Status                   |   | - Sensor Status                  |   |
-|  | - Command Receive / Execute        |   | - Command Receive / Execute      |   |
-|  +------------------+-----------------+   +-----------------+----------------+   |
-+---------------------+-------------------------------------------+---------------+
-                      | C2 Data Link (Telemetry/Report down)      | C2 Data Link
-                      | Command / Tasking up                      | Command / Tasking up
-                      v                                           v
+┌─────────────────────────── UAV / UGV Asset Layer ─────────────────────────────┐
+│                                                                               │
+│  ┌────────── UAV Simulator ──────────┐  ┌────────── UGV Simulator ──────────┐ │
+│  │ - Autopilot / FC Logic            │  │ - Vehicle Controller Logic        │ │
+│  │ - MAVLink-like Telemetry/Command  │  │ - ROS2/MQTT-like Telemetry        │ │
+│  │ - Payload Status                  │  │ - Sensor Status                   │ │
+│  │ - Command Receive / Execute       │  │ - Command Receive / Execute       │ │
+│  └─────────────────┬─────────────────┘  └─────────────────┬─────────────────┘ │
+└────────────────────┼──────────────────────────────────────┼───────────────────┘
+                     │ C2 Data Link                         │ C2 Data Link
+                     │ Telemetry / Report (down)            │ Telemetry / Report (down)
+                     │ Command / Tasking (up)               │ Command / Tasking (up)
+                     ▼                                      ▼
 
-+-----------------------------------------------------------------------------------+
-| GCS / Ground Gateway / Mission Control Server                                     |
-| - UAV / UGV Telemetry receive & parse                                             |
-| - Mission status decision                                                         |
-| - Manual control / Command generation                                             |
-| - Convert Upper C2/BMS orders to UAV/UGV Commands                                |
-| - Tactical net message mapping: position / status / mission / target / video meta |
-+---------------+---------------------+---------------------+-----------------------+
-                |                     |                     |
-                v                     v                     v
-    +-------------------+   +--------------------+   +---------------------+
-    | Dashboard         |   | Telemetry          |   | AI Defense Agent    |
-    | - Status/map view |   | Collector / LogDB  |   | - Realtime analysis |
-    | - Mission display |   | - Telemetry Log    |   | - Command integrity |
-    | - Alert display   |   | - Command Log      |   | - Anomaly detection |
-    | - Attack/defense  |   | - Network Log      |   | - Response decision |
-    +-------------------+   | - Attack Log       |   +----------+----------+
-                            +--------------------+              |
-                                                                v
-                                                   Alert / Block / Quarantine
-                                                   Re-route / Fallback / Review
-                ^
-                | Controlled attack event injection
-+---------------+-------------------------------------------------------------------+
-| AI Attack Agent                                                                   |
-| - Auto attack event generation inside Docker virtual network                     |
-| - Telemetry forgery / Command tampering / GPS anomaly injection                   |
-| - Comm delay / loss / block / manipulation events                                 |
-| - AI Defense Agent detection performance validation                               |
-| * Operates only inside closed UAV/UGV domain virtual environment                 |
-+-----------------------------------------------------------------------------------+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ GCS / Ground Gateway / Mission Control Server                                 │
+│ - UAV / UGV Telemetry receive & parse                                         │
+│ - Mission status decision                                                     │
+│ - Manual control / Command generation                                         │
+│ - Convert Upper C2/BMS orders to UAV/UGV Commands                             │
+│ - Tactical net message mapping: pos / status / mission / target / video meta  │
+└──────────────┬──────────────────────┬──────────────────────┬──────────────────┘
+               │                      │                      │
+               ▼                      ▼                      ▼
+   ┌──────────────────┐  ┌───────────────────────┐  ┌───────────────────────┐
+   │ Dashboard        │  │ Telemetry             │  │ AI Defense Agent      │
+   │ - Status/map     │  │ Collector / LogDB     │  │ - Realtime analysis   │
+   │ - Mission view   │  │ - Telemetry Log       │  │ - Command integrity   │
+   │ - Alert display  │  │ - Command Log         │  │ - Anomaly detection   │
+   │ - Attack/defense │  │ - Network / Attack Log│  │ - Response decision   │
+   └──────────────────┘  └───────────────────────┘  └───────────┬───────────┘
+                                                                 │
+                                                                 ▼
+                                                    Alert / Block / Quarantine
+                                                    Re-route / Fallback / Review
 
-                      |
-                      | Tactical net data
-                      | Report / Situation Data (down)
-                      | Command / Tasking (up)
-                      v
+               ▲
+               │ Controlled attack event injection
+┌──────────────┴────────────────────────────────────────────────────────────────┐
+│ AI Attack Agent                                                               │
+│ - Auto attack event generation inside Docker virtual network                  │
+│ - Telemetry forgery / Command tampering / GPS anomaly injection                │
+│ - Comm delay / loss / block / manipulation events                              │
+│ - AI Defense Agent detection performance validation                            │
+│ * Operates only inside closed UAV/UGV domain virtual environment               │
+└───────────────────────────────────────────────────────────────────────────────┘
 
-+-----------------------------------------------------------------------------------+
-| Virtual Tactical Router / TIPS                                                    |
-| - Docker Network based virtual tactical router                                    |
-| - IP packet routing between GCS and tactical network                              |
-| - Delay / loss / block / tamper event injection point                             |
-| - QoS / priority processing simulation                                            |
-| - Relay tactical net data converted by GCS                                        |
-| * Does not parse MAVLink / ROS2 directly                                          |
-+----------------------+------------------------------------------------------------+
-                       | Report / Situation Data (down) / Command / Tasking (up)
-                       v
+                     │ Tactical net data
+                     │ Report / Situation Data (down)
+                     │ Command / Tasking (up)
+                     ▼
 
-+-----------------------------------------------------------------------------------+
-| TMMR / Tactical Radio (CNRS-series)                                               |
-| - Tactical radio node                                                             |
-| - Voice / data transceiver                                                        |
-| - TICN access segment                                                             |
-| - Tactical radio link simulation                                                  |
-+----------------------+------------------------------------------------------------+
-                       | Report / Situation Data (down) / Command / Tasking (up)
-                       v
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ Virtual Tactical Router / TIPS                                                │
+│ - Docker Network based virtual tactical router                                │
+│ - IP packet routing between GCS and tactical network                          │
+│ - Delay / loss / block / tamper event injection point                         │
+│ - QoS / priority processing simulation                                        │
+│ - Relay tactical net data converted by GCS                                    │
+│ * Does not parse MAVLink / ROS2 directly                                      │
+└─────────────────────┬─────────────────────────────────────────────────────────┘
+                      │ Report / Situation Data (down) / Command / Tasking (up)
+                      ▼
 
-+-----------------------------------------------------------------------------------+
-| TICN-like Tactical Network                                                        |
-| - Tactical information communication network simulation                           |
-| - Tactical data network                                                           |
-| - C4ISR / command & control network flow simulation                               |
-| - Connect field tactical nodes to upper command system                            |
-+----------------------+------------------------------------------------------------+
-                       | Report / Situation Data (down) / Command / Tasking (up)
-                       v
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ TMMR / Tactical Radio (CNRS-series)                                           │
+│ - Tactical radio node                                                         │
+│ - Voice / data transceiver                                                    │
+│ - TICN access segment                                                         │
+│ - Tactical radio link simulation                                               │
+└─────────────────────┬─────────────────────────────────────────────────────────┘
+                      │ Report / Situation Data (down) / Command / Tasking (up)
+                      ▼
 
-+-----------------------------------------------------------------------------------+
-| Upper C2 / BMS Simulator                                                          |
-| - Operational situation sharing                                                   |
-| - Target / coordinate sharing                                                     |
-| - Surveillance zone assignment                                                    |
-| - Mission change order                                                            |
-| - Higher command dissemination                                                    |
-| * Does not command UAV/UGV directly -- converted to Commands via GCS              |
-+-----------------------------------------------------------------------------------+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ TICN-like Tactical Network                                                    │
+│ - Tactical information communication network simulation                       │
+│ - Tactical data network                                                       │
+│ - C4ISR / command & control network flow simulation                           │
+│ - Connect field tactical nodes to upper command system                        │
+└─────────────────────┬─────────────────────────────────────────────────────────┘
+                      │ Report / Situation Data (down) / Command / Tasking (up)
+                      ▼
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ Upper C2 / BMS Simulator                                                      │
+│ - Operational situation sharing                                                │
+│ - Target / coordinate sharing                                                  │
+│ - Surveillance zone assignment                                                 │
+│ - Mission change order / Higher command dissemination                          │
+│ * Does not command UAV/UGV directly -- converted to Commands via GCS           │
+└───────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 구현 범위
