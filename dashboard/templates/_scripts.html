@@ -33,6 +33,7 @@
     keyboard: false, touchZoom: false, boxZoom: false,
   }).setView([37.895, 126.800], 14);
   SAT().addTo(camUAV);
+  setTimeout(() => camUAV.invalidateSize(), 100);
 
   // 실제 UAV 위치로 카메라 부드럽게 이동 — 데이터 주기(1.5s)마다 1회 호출
   function updateCamUAV(u) {
@@ -467,12 +468,27 @@
     let   curFilter = 'all';
     let   curSearch = '';
 
-    // 필터 버튼
+    // 필터 버튼 — 다중 선택 토글
+    const activeFilters = new Set(['all']);
+
     document.querySelectorAll('.log-filter-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.log-filter-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        curFilter = btn.dataset.filter;
+        const f = btn.dataset.filter;
+        if (f === 'all') {
+          activeFilters.clear();
+          activeFilters.add('all');
+        } else {
+          activeFilters.delete('all');
+          if (activeFilters.has(f)) {
+            activeFilters.delete(f);
+            if (activeFilters.size === 0) activeFilters.add('all');
+          } else {
+            activeFilters.add(f);
+          }
+        }
+        document.querySelectorAll('.log-filter-btn').forEach(b => {
+          b.classList.toggle('active', activeFilters.has(b.dataset.filter));
+        });
         applyFilter();
       });
     });
@@ -483,23 +499,39 @@
       applyFilter();
     });
 
+    function rowMatchesFilter(tr) {
+      if (activeFilters.has('all')) return true;
+      // 유형 그룹 (tel / cmd) — 선택된 것 중 하나라도 일치
+      const typeFilters = ['tel', 'cmd'].filter(f => activeFilters.has(f));
+      const typeMatch = typeFilters.length === 0 || typeFilters.includes(tr.dataset.type);
+      // 플랫폼 그룹 (uav / ugv) — 선택된 것 중 하나라도 일치
+      const platFilters = ['uav', 'ugv'].filter(f => activeFilters.has(f));
+      const platMatch = platFilters.length === 0 ||
+        (platFilters.includes('uav') && tr.classList.contains('row-uav')) ||
+        (platFilters.includes('ugv') && tr.classList.contains('row-ugv'));
+      // 두 그룹 모두 통과해야 표시
+      return typeMatch && platMatch;
+    }
+
     function applyFilter() {
       let visible = 0;
       logBody.querySelectorAll('tr').forEach(tr => {
-        const typeMatch = curFilter === 'all' || tr.dataset.type === curFilter;
-        const text      = tr.textContent.toLowerCase();
-        const srchMatch = !curSearch || text.includes(curSearch);
-        const hide      = !(typeMatch && srchMatch);
+        const typeMatch = rowMatchesFilter(tr);
+        const srchMatch = !curSearch || tr.textContent.toLowerCase().includes(curSearch);
+        const hide = !(typeMatch && srchMatch);
         tr.dataset.hidden = hide ? 'true' : 'false';
+        tr.style.display  = hide ? 'none' : '';
         if (!hide) visible++;
       });
       if (logCount) logCount.textContent = visible + ' rows';
     }
 
+    const logScroll = logBody.closest('.log-scroll');
     function addLog(html) {
-      logBody.insertAdjacentHTML('afterbegin', html);
-      if (logBody.children.length > 150) logBody.lastElementChild.remove();
+      logBody.insertAdjacentHTML('beforeend', html);
+      if (logBody.children.length > 150) logBody.firstElementChild.remove();
       applyFilter();
+      if (logScroll) logScroll.scrollTop = logScroll.scrollHeight;
     }
 
     // 헤더 칩 유틸
@@ -534,8 +566,8 @@
       setDot('dot-ugv', isOn(ugv) ? 'g' : 'r'); setText('hdr-ugv', isOn(ugv) ? '1/1' : '0/1');
       setDot('dot-gcs', sysOk ? 'g' : 'r');     setText('hdr-gcs', sysOk ? 'Online' : 'Offline');
       setDot('dot-c2',  sysOk ? 'g' : 'r');     setText('hdr-c2',  sysOk ? 'Online' : 'Offline');
-      if (uav?.router_received_at) {
-        const ms = Math.round((Date.now() / 1000 - uav.router_received_at) * 1000);
+      if (uav?.gcs_received_at) {
+        const ms = Math.round((Date.now() / 1000 - uav.gcs_received_at) * 1000);
         const v  = ms > 0 && ms < 9999 ? ms : null;
         setText('hdr-latency', (v ?? '--') + ' ms');
         setDot('dot-latency', v == null ? 'r' : v < 500 ? 'g' : 'r');
@@ -546,25 +578,68 @@
         setDot('dot-loss', loss < 10 ? 'g' : loss < 25 ? 'b' : 'r');
       }
 
-      // 링크 상태 패널
-      if (uav?.ticn) {
-        const ms = uav.router_received_at ? Math.round((Date.now()/1000 - uav.router_received_at)*1000) : null;
-        setLink('lnk-uav-st', 'lnk-uav-lat', 'lnk-uav-loss', isOn(uav), ms, uav.ticn.loss_pct);
-      }
-      if (ugv?.ticn) {
-        const ms = ugv.router_received_at ? Math.round((Date.now()/1000 - ugv.router_received_at)*1000) : null;
-        setLink('lnk-ugv-st', 'lnk-ugv-lat', 'lnk-ugv-loss', isOn(ugv), ms, ugv.ticn.loss_pct);
+      // 링크 상태 패널 — 새 아키텍처
+      const setBadge = (id, ok, label) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = label ?? (ok ? '정상' : '오프라인');
+        el.className   = ok ? 'badge b-ok' : 'badge b-warn';
+      };
+      const age = ts => ts ? Math.round((Date.now()/1000 - ts)*1000) : null;
+
+      // CC → GCS (MAVLink/UDP)
+      const uavAge = age(uav?.gcs_received_at);
+      const uavOn  = isOn(uav) && uavAge != null && uavAge < 5000;
+      setBadge('lnk-uav-st', uavOn);
+      setText('lnk-uav-lat',  uavAge != null ? uavAge + ' ms' : '-- ms');
+      setText('lnk-uav-loss', uav?.ticn?.loss_pct != null ? uav.ticn.loss_pct + ' %' : '-- %');
+
+      // GCS → Router (TMMR/TICN) — UAV 데이터가 흐를 때 링크 활성
+      const tmmr    = uav?.tmmr;
+      const ticn    = uav?.ticn;
+      const lq      = ticn?.link_quality ?? null;
+      const gcsRtOn = isOn(uav) && lq != null && lq > 30;
+      setBadge('lnk-gcs-rt-st', gcsRtOn);
+      if (tmmr?.waveform) setText('lnk-gcs-rt-wf', tmmr.waveform);
+      setText('lnk-gcs-rt-rssi', tmmr?.rssi_dbm != null ? tmmr.rssi_dbm + ' dBm' : '-- dBm');
+      setText('lnk-gcs-rt-loss', ticn?.loss_pct  != null ? ticn.loss_pct  + ' %'  : '-- %');
+
+      // Router → Upper C2/BMS (TICN)
+      setBadge('lnk-rt-c2-st', gcsRtOn);
+      setText('lnk-rt-c2-lq',   lq != null ? 'LQ ' + lq : 'LQ --');
+      setText('lnk-rt-c2-loss', ticn?.loss_pct != null ? ticn.loss_pct + ' %' : '-- %');
+
+      // C2 → Router → GCS (명령 하달 경로 — 전술망 정상 시 활성)
+      setBadge('lnk-c2-rt-st', sysOk && gcsRtOn);
+
+      // UGV → Router (ROS2/JSON)
+      const ugvAge = age(ugv?.gcs_received_at);
+      const ugvOn  = isOn(ugv) && ugvAge != null && ugvAge < 5000;
+      setBadge('lnk-ugv-st', ugvOn);
+      setText('lnk-ugv-lat',  ugvAge != null ? ugvAge + ' ms' : '-- ms');
+      setText('lnk-ugv-loss', ugv?.ticn?.loss_pct != null ? ugv.ticn.loss_pct + ' %' : '-- %');
+
+      // UTC 시간 문자열 → 로컬(KST) 시간 문자열 변환
+      function utcToLocal(timeStr) {
+        if (!timeStr || !timeStr.includes(':')) return timeStr;
+        const [h, m, s] = timeStr.split(':').map(Number);
+        const d = new Date();
+        d.setUTCHours(h, m, s, 0);
+        return d.toTimeString().slice(0, 8);
       }
 
-      // Telemetry 로그
-      events.forEach(ev => {
-        const key = `${ev.time}|${ev.source}|${ev.message}`;
+      // Telemetry 로그 — type이 telemetry인 이벤트만
+      const latestBySource = {};
+      events.filter(ev => ev.type === 'telemetry' || !ev.type).forEach(ev => {
+        latestBySource[ev.source] = ev;
+      });
+      Object.values(latestBySource).forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `${localTime}|${ev.source}`;
         if (seen1.has(key)) return;
         seen1.add(key);
         const isUAV  = ev.source === 'UAV-001';
         const p      = platforms[ev.source] || {};
-        const seqM   = ev.message.match(/seq=(\d+)/);
-        const seq    = seqM ? seqM[1] : '-';
         const proto  = isUAV ? '<span class="badge b-mav">MAVLink</span>' : '<span class="badge b-ros">ROS2_JSON</span>';
         const mtype  = isUAV ? 'GLOBAL_POSITION' : 'ODOM';
         const detail = isUAV
@@ -573,7 +648,7 @@
         const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';
         const rowCls = isUAV ? 'row-uav' : 'row-ugv';
         addLog(`<tr class="${rowCls}" data-type="tel">
-          <td class="col-time">${ev.time}</td>
+          <td class="col-time">${localTime}</td>
           <td><span class="log-type-tel">TEL</span></td>
           <td class="${srcCls}">${ev.source}</td>
           <td class="col-data" title="${mtype}: ${detail}">${mtype}: ${detail}</td>
@@ -582,33 +657,24 @@
         </tr>`);
       });
 
-      // Command 로그
-      Object.values(platforms).forEach(p => {
-        const prev = lseqs1[p.platform_id];
-        if (prev === undefined) { lseqs1[p.platform_id] = p.seq; return; }
-        if (p.seq === prev) return;
-        lseqs1[p.platform_id] = p.seq;
-        const isUAV = p.platform_type === 'UAV';
-        const now   = new Date().toTimeString().slice(0, 8);
-        let cmd, src, badge;
-        if (isUAV) {
-          if      (p.fuel < 30)     { cmd = `RTB (연료 ${p.fuel}%)`;          src = 'C2_SERVER'; badge = '<span class="badge b-ok">ACK</span>'; }
-          else if (p.seq % 6 === 0) { cmd = `WAYPOINT 이동 (seq=${p.seq})`;   src = 'C2_SERVER'; badge = '<span class="badge b-ok">ACK</span>'; }
-          else if (p.seq % 4 === 0) { cmd = `고도 유지 (${p.alt}m)`;          src = 'GCS';       badge = '<span class="badge b-ok">ACK</span>'; }
-          else                      { cmd = `상태 보고 요청`;                  src = 'C2_SERVER'; badge = '<span class="badge b-sent">SENT</span>'; }
-        } else {
-          if      (p.battery < 20)  { cmd = `복귀 명령 (배터리 ${p.battery}%)`; src = 'GCS';     badge = '<span class="badge b-ok">ACK</span>'; }
-          else if (p.seq % 5 === 0) { cmd = `전진 이동 (${p.speed}m/s)`;      src = 'GCS';       badge = '<span class="badge b-ok">ACK</span>'; }
-          else if (p.seq % 3 === 0) { cmd = `정찰 구역 유지`;                 src = 'C2_SERVER'; badge = '<span class="badge b-ok">ACK</span>'; }
-          else                      { cmd = `센서 상태 조회`;                  src = 'C2_SERVER'; badge = '<span class="badge b-sent">SENT</span>'; }
-        }
+      // Command 로그 — 실제 전송된 명령만 (type === 'command')
+      events.filter(ev => ev.type === 'command').forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `cmd|${localTime}|${ev.source}|${ev.message}`;
+        if (seen1.has(key)) return;
+        seen1.add(key);
+        const target = ev.target || '';
+        const isUAV  = target === 'UAV-001' || target === '';
         const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';
         const rowCls = isUAV ? 'row-uav' : 'row-ugv';
+        const badge  = ev.status === 'ACK'
+          ? '<span class="badge b-ok">ACK</span>'
+          : '<span class="badge b-sent">SENT</span>';
         addLog(`<tr class="${rowCls}" data-type="cmd">
-          <td class="col-time">${now}</td>
+          <td class="col-time">${localTime}</td>
           <td><span class="log-type-cmd">CMD</span></td>
-          <td class="${srcCls}">${p.platform_id}</td>
-          <td class="col-data">${cmd} — ${src}</td>
+          <td class="${srcCls}">${target || '—'}</td>
+          <td class="col-data">${ev.message} — ${ev.source}</td>
           <td></td>
           <td>${badge}</td>
         </tr>`);
@@ -650,7 +716,11 @@
       setTimeout(tickMsn, 1000);
     })();
 
+    const msnCmdCooldown = {};
     window.sendMsnCmd = function(cmd) {
+      if (msnCmdCooldown[cmd]) return;
+      msnCmdCooldown[cmd] = true;
+      setTimeout(() => { delete msnCmdCooldown[cmd]; }, 4000);
       const labels = { HOLD: '경로 유지', MONITOR: '감시 강화', PAUSE: '임무 일시정지' };
       appendCmd('UAV-001', labels[cmd] || cmd, 'SENT');
       setTimeout(() => updateCmdBadge('UAV-001', labels[cmd] || cmd, 'ACK'), 800 + Math.random() * 600);
@@ -684,16 +754,24 @@
 
     // 시드 데이터로 초기 로그 채우기
     const now = Date.now();
-    CMD_SEED.slice().reverse().forEach((c, i) => {
+    CMD_SEED.forEach((c, i) => {
       const t = new Date(now - (CMD_SEED.length - i) * 3000);
-      cmdLog.prepend(makeCmdItem(t.toTimeString().slice(0,8), c.src, c.name, c.status));
+      cmdLog.appendChild(makeCmdItem(t.toTimeString().slice(0,8), c.src, c.name, c.status));
     });
+    cmdLog.scrollTop = cmdLog.scrollHeight;
+
+    // 휠 스크롤 속도 줄이기
+    cmdLog.addEventListener('wheel', e => {
+      e.preventDefault();
+      cmdLog.scrollTop += e.deltaY * 0.3;
+    }, { passive: false });
 
     function appendCmd(src, name, status) {
       if (!cmdLog) return;
       const item = makeCmdItem(nowStr(), src, name, status);
-      cmdLog.prepend(item);
-      while (cmdLog.children.length > 30) cmdLog.lastChild.remove();
+      cmdLog.appendChild(item);
+      while (cmdLog.children.length > 30) cmdLog.firstChild.remove();
+      cmdLog.scrollTop = cmdLog.scrollHeight;
     }
     function updateCmdBadge(src, name, status) {
       const key = src + name;
@@ -859,15 +937,15 @@
         const now   = new Date().toTimeString().slice(0, 8);
         let cmd, src, ack = 'ok';
         if (isUAV) {
-          if      (p.fuel < 30)       { cmd = `RTB (연료 부족 ${p.fuel}%)`;   src = 'C2_SERVER'; }
-          else if (p.seq % 6 === 0)   { cmd = `WAYPOINT 이동 (seq=${p.seq})`; src = 'C2_SERVER'; }
+          if      (p.fuel < 30)       { cmd = `RTB (연료 부족 ${p.fuel}%)`;   src = 'Upper C2/BMS'; }
+          else if (p.seq % 6 === 0)   { cmd = `WAYPOINT 이동 (seq=${p.seq})`; src = 'Upper C2/BMS'; }
           else if (p.seq % 4 === 0)   { cmd = `고도 유지 (${p.alt}m)`;        src = 'GCS'; }
-          else                        { cmd = `상태 보고 요청`;                src = 'C2_SERVER'; ack = 'pend'; }
+          else                        { cmd = `상태 보고 요청`;                src = 'Upper C2/BMS'; ack = 'pend'; }
         } else {
           if      (p.battery < 20)    { cmd = `복귀 명령 (배터리 ${p.battery}%)`; src = 'GCS'; }
           else if (p.seq % 5 === 0)   { cmd = `전진 이동 (${p.speed}m/s)`;    src = 'GCS'; }
-          else if (p.seq % 3 === 0)   { cmd = `정찰 구역 유지`;               src = 'C2_SERVER'; }
-          else                        { cmd = `센서 상태 조회`;                src = 'C2_SERVER'; ack = 'pend'; }
+          else if (p.seq % 3 === 0)   { cmd = `정찰 구역 유지`;               src = 'Upper C2/BMS'; }
+          else                        { cmd = `센서 상태 조회`;                src = 'Upper C2/BMS'; ack = 'pend'; }
         }
         const ackBadge = ack === 'ok' ? '<span class="ack-ok">ACK</span>' : '<span class="ack-pend">PENDING</span>';
         const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';

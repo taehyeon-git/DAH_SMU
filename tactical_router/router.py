@@ -1,3 +1,14 @@
+"""
+Virtual Tactical Router / TIPS
+역할:
+  - GCS 전술망 연동 데이터 수신 (포트 14560)
+  - TMMR / TICN 시뮬레이션 적용
+  - Upper C2/BMS로 상황 데이터 전달 (포트 14545)
+  - Upper C2/BMS 명령 수신 (포트 14546) → GCS로 전달 (포트 14562)
+  - JAM 이벤트 수신 (포트 14590)
+  - HTTP 상태 API (포트 8080)
+※ MAVLink / ROS2 직접 해석 없음 — GCS가 변환한 전술망 데이터만 처리
+"""
 import json
 import math
 import os
@@ -9,33 +20,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from ticn import TMMRNode, TICNNetwork, SharedState
 
-# ── 포트 설정 ──────────────────────────────────────────────────────────────
-CC_LISTEN_PORT  = int(os.getenv("CC_LISTEN_PORT",  "14555"))
-UGV_LISTEN_PORT = int(os.getenv("UGV_LISTEN_PORT", "14660"))
-CMD_LISTEN_PORT = int(os.getenv("CMD_LISTEN_PORT", "14580"))
-JAM_LISTEN_PORT = int(os.getenv("JAM_LISTEN_PORT", "14590"))
-STATUS_PORT     = int(os.getenv("STATUS_PORT",     "8080"))
+# ── 포트 설정 ─────────────────────────────────────────────────────────────
+GCS_LISTEN_PORT   = int(os.getenv("GCS_LISTEN_PORT",   "14560"))  # GCS → Router (UAV 전술 릴레이)
+UGV_LISTEN_PORT   = int(os.getenv("UGV_LISTEN_PORT",   "14660"))  # UGV → Router (직접)
+C2_CMD_IN_PORT    = int(os.getenv("C2_CMD_IN_PORT",    "14546"))  # Upper C2 → Router (명령)
+JAM_LISTEN_PORT   = int(os.getenv("JAM_LISTEN_PORT",   "14590"))  # JAM 이벤트
+STATUS_PORT       = int(os.getenv("STATUS_PORT",       "8080"))
 
-MISSION_HOST   = os.getenv("MISSION_HOST",   "mission-control")
-MISSION_PORT   = int(os.getenv("MISSION_PORT",   "14540"))
-COLLECTOR_HOST = os.getenv("COLLECTOR_HOST", "telemetry-collector")
-COLLECTOR_PORT = int(os.getenv("COLLECTOR_PORT", "14541"))
-GCS_HOST       = os.getenv("GCS_HOST",       "dah-gcs")
-GCS_PORT       = int(os.getenv("GCS_PORT",       "14570"))
-DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "dah-dashboard")
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "14571"))
-CC_CMD_HOST    = os.getenv("CC_CMD_HOST",    "dah-companion")
-CC_CMD_PORT    = int(os.getenv("CC_CMD_PORT",    "14552"))
+UPPER_C2_HOST     = os.getenv("UPPER_C2_HOST",    "mission-control")
+UPPER_C2_PORT     = int(os.getenv("UPPER_C2_PORT",    "14545"))  # Router → Upper C2
+
+GCS_HOST          = os.getenv("GCS_HOST",          "dah-gcs")
+GCS_CMD_PORT      = int(os.getenv("GCS_CMD_PORT",      "14562"))  # Router → GCS (명령 하달)
+
+DASHBOARD_HOST    = os.getenv("DASHBOARD_HOST",    "dah-dashboard")
+DASHBOARD_PORT    = int(os.getenv("DASHBOARD_PORT",    "14571"))  # Router → Dashboard (UGV fan-out)
 
 ROUTER_LAT = float(os.getenv("ROUTER_LAT", "37.85"))
 ROUTER_LON = float(os.getenv("ROUTER_LON", "126.85"))
-
-FAN_OUT = [
-    ("Mission Control", MISSION_HOST,   MISSION_PORT),
-    ("Collector",       COLLECTOR_HOST, COLLECTOR_PORT),
-    ("GCS",             GCS_HOST,       GCS_PORT),
-    ("Dashboard",       DASHBOARD_HOST, DASHBOARD_PORT),
-]
 
 
 # ── HTTP 상태 API ──────────────────────────────────────────────────────────
@@ -101,7 +103,9 @@ def haversine(lat1, lon1, lat2, lon2) -> float:
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
+    a = (math.sin(dlat/2)**2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon/2)**2)
     return R * 2 * math.asin(math.sqrt(a))
 
 
@@ -117,6 +121,22 @@ def jam_udp_listener(shared: SharedState):
             print(f"[TICN]  JAM 파싱 오류: {e}")
 
 
+def c2_cmd_listener(out_sock: socket.socket):
+    """Upper C2/BMS 명령 수신 → GCS로 전달 (TMMR/TICN 역방향 경로)"""
+    sock = bind_udp(C2_CMD_IN_PORT)
+    print(f"[ROUTER] Upper C2 명령 수신 대기  :{C2_CMD_IN_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(4096)
+            cmd = json.loads(data.decode())
+            cmd["via"] = f"Upper C2 → TICN → TMMR → Router → GCS"
+            cmd["router_forwarded_at"] = time.time()
+            out_sock.sendto(json.dumps(cmd).encode(), (GCS_HOST, GCS_CMD_PORT))
+            print(f"[ROUTER] C2 명령 [{cmd.get('command')}] → GCS:{GCS_CMD_PORT}")
+        except Exception as e:
+            print(f"[ROUTER] C2 명령 처리 오류: {e}")
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -124,25 +144,25 @@ def main():
     tmmr_nodes: dict[str, TMMRNode] = {}
     ticn        = TICNNetwork()
 
-    # HTTP 상태 API
     http_srv = HTTPServer(("0.0.0.0", STATUS_PORT), make_http_handler(shared, tmmr_nodes, ticn))
     threading.Thread(target=http_srv.serve_forever, daemon=True).start()
     print(f"[TICN]  HTTP API  :{STATUS_PORT}  →  /api/ticn/status")
 
-    # JAM UDP 리스너
     threading.Thread(target=jam_udp_listener, args=(shared,), daemon=True).start()
 
-    cc_sock  = bind_udp(CC_LISTEN_PORT)
+    gcs_sock = bind_udp(GCS_LISTEN_PORT)
     ugv_sock = bind_udp(UGV_LISTEN_PORT)
-    cmd_sock = bind_udp(CMD_LISTEN_PORT)
     out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    print("[ROUTER] ── TICN 전술 라우터 시작 ──────────────────────────")
-    print(f"         CC(UAV) :{CC_LISTEN_PORT}  UGV :{UGV_LISTEN_PORT}  CMD :{CMD_LISTEN_PORT}")
-    print(f"         Fan-out ×{len(FAN_OUT)}: " + ", ".join(f"{n}:{p}" for n, _, p in FAN_OUT))
+    threading.Thread(target=c2_cmd_listener, args=(out_sock,), daemon=True).start()
+
+    print("[ROUTER] ── Virtual Tactical Router / TIPS 시작 ──────────────────")
+    print(f"         GCS(UAV) 수신  :{GCS_LISTEN_PORT}  UGV 수신  :{UGV_LISTEN_PORT}")
+    print(f"         Upper C2  → {UPPER_C2_HOST}:{UPPER_C2_PORT}")
+    print(f"         C2 명령   :{C2_CMD_IN_PORT}  → GCS:{GCS_CMD_PORT}")
 
     while True:
-        readable, _, _ = select.select([cc_sock, ugv_sock, cmd_sock], [], [], 1)
+        readable, _, _ = select.select([gcs_sock, ugv_sock], [], [], 1)
         for sock in readable:
             data, addr = sock.recvfrom(8192)
             try:
@@ -150,33 +170,26 @@ def main():
             except json.JSONDecodeError:
                 continue
 
-            # ── Command (QoS 우선 — TICN 손실 최소화)
-            if sock is cmd_sock:
-                payload.update({"router_forwarded_at": time.time(), "via": "TICN/TMMR"})
-                out_sock.sendto(json.dumps(payload).encode(), (CC_CMD_HOST, CC_CMD_PORT))
-                print(f"[CMD]  [{payload.get('command')}]  {addr[0]} → CC:{CC_CMD_PORT}")
-                continue
-
-            # ── Telemetry: TMMR → TICN 처리
             payload["router_received_at"] = time.time()
-            pid = payload.get('platform_id', 'UNKNOWN')
+            pid = payload.get("platform_id", "UNKNOWN")
 
+            # TMMR 노드 초기화
             if pid not in tmmr_nodes:
                 tmmr_nodes[pid] = TMMRNode(pid)
             tmmr = tmmr_nodes[pid]
 
-            lat     = payload.get('lat') or 0
-            lon     = payload.get('lon') or 0
-            alt     = payload.get('alt') or 0
+            lat     = payload.get("lat") or 0
+            lon     = payload.get("lon") or 0
+            alt     = payload.get("alt") or 0
             dist_km = haversine(ROUTER_LAT, ROUTER_LON, lat, lon) if (lat and lon) else 0.0
 
-            # TMMR 레이어
+            # TMMR 레이어 시뮬레이션
             jammed = shared.active_jammed()
             tmmr.update_rssi(dist_km, alt, jammed)
             tmmr.auto_hop(jammed, lambda ev: (shared.log(ev), ticn.log(ev)))
             tmmr.adjust_tx_power(dist_km)
 
-            # TICN 레이어
+            # TICN 레이어 시뮬레이션
             ticn.update_link(pid, dist_km, tmmr)
             result = ticn.route(payload, tmmr)
 
@@ -185,21 +198,25 @@ def main():
                 print(f"[TICN]  DROP  {pid}  LQ={lq.quality if lq else '?'}  jam={tmmr.jam_detected}")
                 continue
 
-            failed = []
-            for name, host, port in FAN_OUT:
-                try:
-                    out_sock.sendto(json.dumps(result).encode(), (host, port))
-                except Exception:
-                    failed.append(name)
+            # Upper C2/BMS로 전달
+            try:
+                out_sock.sendto(json.dumps(result).encode(), (UPPER_C2_HOST, UPPER_C2_PORT))
+            except Exception as e:
+                print(f"[ROUTER] Upper C2 전송 실패: {e}")
 
-            t = result.get('tmmr', {})
-            n = result.get('ticn', {})
-            fo = f"fan-out×{len(FAN_OUT)-len(failed)}" + (f" fail:{','.join(failed)}" if failed else "")
+            # 모든 플랫폼 — TICN 처리 결과(tmmr/ticn 포함)를 Dashboard로 fan-out
+            try:
+                out_sock.sendto(json.dumps(result).encode(), (DASHBOARD_HOST, DASHBOARD_PORT))
+            except Exception as e:
+                print(f"[ROUTER] Dashboard 전송 실패: {e}")
+
+            t = result.get("tmmr", {})
+            n = result.get("ticn", {})
             print(
                 f"[TICN]  {pid}  wf={t.get('waveform')}  "
                 f"RSSI={t.get('rssi_dbm')}dBm  TX={t.get('tx_power_pct')}%  "
                 f"LQ={n.get('link_quality')}  loss={n.get('loss_pct')}%  "
-                f"dist={n.get('dist_km')}km  {fo}"
+                f"dist={n.get('dist_km')}km  → Upper C2"
             )
 
 

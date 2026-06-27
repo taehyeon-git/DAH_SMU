@@ -247,7 +247,10 @@
 
   /* ── 최근 명령 ── */
   .cmd-card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .cmd-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; min-height: 0; }
+  .cmd-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; min-height: 0; scrollbar-width: thin; scrollbar-color: #d1d5db transparent; }
+  .cmd-log::-webkit-scrollbar { width: 4px; }
+  .cmd-log::-webkit-scrollbar-track { background: transparent; }
+  .cmd-log::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
   .cmd-item {
     display: flex; align-items: center; gap: 7px;
     padding: 5px 8px; border-radius: 6px;
@@ -337,8 +340,10 @@
     color: #6b7a9a; cursor: pointer; transition: all 0.15s;
   }
   .log-filter-btn.active {
-    background: #2563eb; color: #fff; border-color: #2563eb;
+    background: #2563eb; color: #fff !important; border-color: #2563eb;
   }
+  .log-filter-uav:not(.active) { color: #2563eb; }
+  .log-filter-ugv:not(.active) { color: #16a34a; }
   .log-search-wrap { width: 160px; flex: none; }
   .log-search {
     width: 100%; padding: 4px 10px; border-radius: 6px;
@@ -352,7 +357,10 @@
   .log-tbl tr[data-hidden="true"] { display: none; }
 
   /* 로그 공통 */
-  .log-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+  .log-scroll { flex: 1; overflow-y: auto; min-height: 0; scrollbar-width: thin; scrollbar-color: #d1d5db transparent; }
+  .log-scroll::-webkit-scrollbar { width: 4px; }
+  .log-scroll::-webkit-scrollbar-track { background: transparent; }
+  .log-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
   .log-tbl { width: 100%; border-collapse: collapse; }
   .log-tbl thead th {
     position: sticky; top: 0; background: #f4f6fa; z-index: 1;

@@ -13,7 +13,7 @@ services:
         ipv4_address: 172.20.0.10         # UAV 고정 IP
 
   # ── Companion Computer (UAV 탑재 컴퓨터)
-  # MAVLink 수신(dah-net) → JSON 변환 → Tactical Router UDP(ops_net)
+  # MAVLink 수신(dah-net) → JSON 변환 → GCS UDP(ops_net)
   dah-companion:
     build:
       context: .
@@ -21,17 +21,17 @@ services:
     container_name: dah-companion
     environment:
       MAVLINK_PORT: 14550
-      ROUTER_HOST: tactical-router
-      ROUTER_PORT: 14555
-      CMD_PORT: 14552
+      GCS_HOST: dah-gcs
+      GCS_PORT: 14555                     # CC → GCS 텔레메트리
+      CMD_PORT: 14552                     # GCS → CC 직접 명령
       UAV_HOST: 172.20.0.10
       UAV_CMD_PORT: 14551
     depends_on:
-      - tactical-router
+      - dah-gcs
     networks:
       dah-net:
         ipv4_address: 172.20.0.30         # dah-net: UAV MAVLink 수신
-      ops_net:                             # ops_net: Router로 텔레메트리 전달
+      ops_net:                             # ops_net: GCS로 텔레메트리 전달
 
   # ── UGV 시뮬레이터
   dah-ugv:
@@ -50,47 +50,65 @@ services:
       dah-net:
         ipv4_address: 172.20.0.20
 
-  # ── TICN 전술 라우터
-  # CC(UAV) + UGV 텔레메트리 수신 → GCS / Mission Control / Dashboard / Collector fan-out
-  # GCS/MC Command 수신 → CC 전달
-  # TICN 레이어: 채널(VHF/UHF/HF), 링크품질, 패킷손실, 재밍→채널홉
+  # ── GCS / Ground Gateway / Mission Control Server  ← 중앙 허브
+  # CC(UAV) 텔레메트리 직수신 → Dashboard / Collector / Router fan-out
+  # Upper C2 명령(Router 경유) → CC 하달
+  # 운용자 직접 Command → CC
+  dah-gcs:
+    build:
+      context: .
+      dockerfile: gcs/Dockerfile
+    container_name: dah-gcs
+    environment:
+      CC_LISTEN_PORT: 14555               # CC → GCS 텔레메트리
+      C2_CMD_LISTEN_PORT: 14562           # Router → GCS Upper C2 명령
+      DASHBOARD_HOST: dah-dashboard
+      DASHBOARD_PORT: 14571               # GCS → Dashboard fan-out
+      COLLECTOR_HOST: telemetry-collector
+      COLLECTOR_PORT: 14541               # GCS → Collector fan-out
+      ROUTER_HOST: tactical-router
+      ROUTER_PORT: 14560                  # GCS → Router 전술 릴레이
+      CC_HOST: dah-companion
+      CC_CMD_PORT: 14552                  # GCS → CC 직접 명령
+    depends_on:
+      - tactical-router
+      - telemetry-collector
+    networks:
+      - ops_net
+
+  # ── Virtual Tactical Router / TIPS
+  # GCS 전술망 데이터 수신 → TMMR/TICN 시뮬레이션 → Upper C2/BMS 전달
+  # Upper C2 명령 수신 → GCS 하달
   tactical-router:
     build:
       context: .
       dockerfile: tactical_router/Dockerfile
     container_name: dah-tactical-router
     environment:
-      CC_LISTEN_PORT: 14555
-      UGV_LISTEN_PORT: 14660
-      CMD_LISTEN_PORT: 14580
+      GCS_LISTEN_PORT: 14560              # GCS → Router 전술 릴레이 (UAV)
+      UGV_LISTEN_PORT: 14660              # UGV → Router 직접
+      C2_CMD_IN_PORT: 14546              # Upper C2 → Router 명령
       JAM_LISTEN_PORT: 14590
       STATUS_PORT: 8080
       ROUTER_LAT: "37.85"
       ROUTER_LON: "126.85"
-      MISSION_HOST: mission-control
-      MISSION_PORT: 14540
-      COLLECTOR_HOST: telemetry-collector
-      COLLECTOR_PORT: 14541
+      UPPER_C2_HOST: mission-control
+      UPPER_C2_PORT: 14545               # Router → Upper C2
       GCS_HOST: dah-gcs
-      GCS_PORT: 14570
+      GCS_CMD_PORT: 14562                # Router → GCS 명령 하달
       DASHBOARD_HOST: dah-dashboard
-      DASHBOARD_PORT: 14571
-      CC_CMD_HOST: dah-companion
-      CC_CMD_PORT: 14552
-    ports:
-      - "8084:8080"
+      DASHBOARD_PORT: 14571              # Router → Dashboard UGV fan-out
     networks:
       - uav_net
       - ops_net
 
-  # ── C2 / Mission Control 서버
+  # ── Upper C2 / BMS
+  # Router 경유 전술 상황 데이터 수신 → 작전 명령 하달 → Router → GCS → CC → UAV
   mission-control:
     build:
       context: .
       dockerfile: c2/mission_control/Dockerfile
     container_name: dah-mission-control
-    ports:
-      - "8082:8080"
     networks:
       - ops_net
 
@@ -105,24 +123,6 @@ services:
     networks:
       - ops_net
 
-  # ── GCS (Ground Control Station) — 신규
-  # Router로부터 텔레메트리 직수신 / Command → Router → CC → UAV FC
-  dah-gcs:
-    build:
-      context: .
-      dockerfile: gcs/Dockerfile
-    container_name: dah-gcs
-    environment:
-      LISTEN_PORT: 14570
-      ROUTER_HOST: tactical-router
-      ROUTER_CMD_PORT: 14580
-    ports:
-      - "8083:8080"
-    depends_on:
-      - tactical-router
-    networks:
-      - ops_net
-
   # ── 대시보드
   dah-dashboard:
     build:
@@ -130,19 +130,17 @@ services:
       dockerfile: dashboard/Dockerfile
     container_name: dah-dashboard
     depends_on:
-      - dah-ugv
-      - tactical-router
+      - dah-gcs
       - mission-control
       - telemetry-collector
     environment:
       MISSION_CONTROL_URL: http://mission-control:8080
-      ROUTER_TELEMETRY_PORT: 14571
+      GCS_URL: http://dah-gcs:8080
+      ROUTER_TELEMETRY_PORT: 14571        # GCS → Dashboard UDP fan-out 수신 포트
       UAV_HOST: 172.20.0.10
       UAV_CMD_PORT: 14551
       UGV_HOST: 172.20.0.20
       UGV_CMD_PORT: 14661
-    ports:
-      - "8081:8080"
     networks:
       ops_net:
       dah-net:
@@ -187,6 +185,22 @@ services:
     networks:
       dah-net:
         ipv4_address: 172.20.0.60
+
+  # ── API Gateway (nginx) — localhost:8080 단일 진입점
+  dah-gateway:
+    image: nginx:alpine
+    container_name: dah-gateway
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "9000:8080"
+    depends_on:
+      - dah-dashboard
+      - dah-gcs
+      - mission-control
+      - tactical-router
+    networks:
+      - ops_net
 
 # ── 가상 네트워크
 networks:

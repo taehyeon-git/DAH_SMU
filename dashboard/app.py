@@ -2,29 +2,47 @@ import json
 import os
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
+from collections import deque
 from flask import Flask, jsonify, render_template
 
 app = Flask(__name__)
 
 MISSION_CONTROL_URL   = os.getenv("MISSION_CONTROL_URL", "http://mission-control:8080")
-ROUTER_TELEMETRY_PORT = int(os.getenv("ROUTER_TELEMETRY_PORT", "14571"))
+GCS_URL               = os.getenv("GCS_URL",            "http://dah-gcs:8080")
+GCS_TELEMETRY_PORT    = int(os.getenv("ROUTER_TELEMETRY_PORT", "14571"))  # GCS/Router UDP fan-out 수신 포트
 
-# Router로부터 직접 수신한 플랫폼 상태
+# UDP로 직접 수신한 플랫폼 상태 + 로컬 이벤트 (UGV 등 GCS 비경유 데이터)
 router_platforms: dict = {}
+local_events: deque = deque(maxlen=100)
 
 
 def _router_udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", ROUTER_TELEMETRY_PORT))
-    print(f"[DASH] Router 직수신 대기 → UDP {ROUTER_TELEMETRY_PORT}")
+    sock.bind(("0.0.0.0", GCS_TELEMETRY_PORT))
+    print(f"[DASH] UDP 직수신 대기 → {GCS_TELEMETRY_PORT}  (GCS fan-out + Router UGV)")
     while True:
         try:
             data, _ = sock.recvfrom(8192)
             payload = json.loads(data.decode())
-            pid = payload.get("platform_id", "UNKNOWN")
-            router_platforms[pid] = payload
+            pid  = payload.get("platform_id", "UNKNOWN")
+            ptype = payload.get("platform_type", "")
+            router_platforms[pid] = {**payload, "gcs_received_at": time.time()}
+
+            # GCS를 거치지 않는 플랫폼(UGV 등)은 여기서 로컬 이벤트 생성
+            if ptype != "UAV":
+                local_events.appendleft({
+                    "time":    time.strftime("%H:%M:%S"),
+                    "level":   "info",
+                    "source":  pid,
+                    "message": (
+                        f"telemetry seq={payload.get('seq')} "
+                        f"spd={payload.get('speed')}m/s "
+                        f"batt={payload.get('battery')}%"
+                    ),
+                })
         except Exception:
             pass
 
@@ -34,7 +52,7 @@ threading.Thread(target=_router_udp_listener, daemon=True).start()
 
 TOPOLOGY = {
     "title": "UAV/UGV 전술통신 파이프라인",
-    "subtitle": "UAV/UGV 텔레메트리가 Tactical Router를 거쳐 Mission Control과 Collector로 분배됩니다.",
+    "subtitle": "CC(UAV) 텔레메트리가 GCS로 직수신된 후 Dashboard / Collector / Router로 fan-out되고, Router가 TMMR/TICN 시뮬레이션을 통해 Upper C2/BMS로 전달합니다.",
     "network": {
         "name": "uav_net / ops_net / dah-net",
         "subnet": "pipeline separated networks",
@@ -72,16 +90,16 @@ TOPOLOGY = {
             "id": "router",
             "name": "Tactical Router",
             "label": "dah-tactical-router",
-            "role": "UAV/UGV 텔레메트리 fan-out",
+            "role": "GCS 전술망 릴레이 → TMMR/TICN 시뮬레이션 → Upper C2/BMS",
             "status": "implemented",
             "ip": "uav_net/ops_net",
             "group": "network",
         },
         {
             "id": "mission",
-            "name": "Mission Control",
+            "name": "Upper C2/BMS",
             "label": "dah-mission-control",
-            "role": "C2 상태 통합/API 제공",
+            "role": "작전 상황 판단 / 명령 하달",
             "status": "implemented",
             "ip": "ops_net:8080",
             "group": "ops",
@@ -151,10 +169,10 @@ TOPOLOGY = {
         },
         {
             "source": "uav",
-            "target": "router",
-            "protocol": "JSON telemetry / UDP",
-            "port": "14560",
-            "flow": "UAV 위치, 고도, 속도, ISR 상태",
+            "target": "dashboard",
+            "protocol": "MAVLink/JSON / UDP",
+            "port": "14555",
+            "flow": "CC → GCS 텔레메트리 직수신",
             "status": "implemented",
         },
         {
@@ -166,26 +184,43 @@ TOPOLOGY = {
             "status": "implemented",
         },
         {
-            "source": "router",
-            "target": "mission",
+            "source": "dashboard",
+            "target": "router",
             "protocol": "JSON telemetry / UDP",
-            "port": "14540",
-            "flow": "C2 Mission Control 상태 통합",
+            "port": "14560",
+            "flow": "GCS → Router 전술망 릴레이",
+            "status": "implemented",
+        },
+        {
+            "source": "dashboard",
+            "target": "collector",
+            "protocol": "JSON telemetry / UDP",
+            "port": "14541",
+            "flow": "GCS → Collector fan-out",
             "status": "implemented",
         },
         {
             "source": "router",
-            "target": "collector",
-            "protocol": "JSON telemetry / UDP",
-            "port": "14541",
-            "flow": "전술 텔레메트리 로그 저장",
+            "target": "mission",
+            "protocol": "JSON+TMMR/TICN / UDP",
+            "port": "14545",
+            "flow": "Router → Upper C2/BMS 전술 상황",
+            "status": "implemented",
+        },
+        {
+            "source": "mission",
+            "target": "router",
+            "protocol": "JSON / UDP",
+            "port": "14546",
+            "flow": "Upper C2/BMS 작전 명령 하달",
             "status": "implemented",
         },
     ],
     "notes": [
-        "기본 파이프라인은 UAV/UGV -> Tactical Router -> Mission Control/Collector 입니다.",
+        "텔레메트리 파이프라인: CC → GCS → (Dashboard / Collector / Router) → Upper C2/BMS",
+        "명령 파이프라인: Upper C2/BMS → Router → GCS → CC → UAV FC (MAVLink)",
         "Recon/Executor/Defense는 별도의 직접 공격/방어 실습 레이어로 유지됩니다.",
-        "Mission Control API는 http://localhost:8082 로 확인할 수 있습니다.",
+        "Upper C2/BMS API: http://localhost:8082  |  GCS API: http://localhost:8083",
     ],
 }
 
@@ -217,25 +252,44 @@ def topology():
 
 
 
+def fetch_gcs(path):
+    url = f"{GCS_URL}{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as response:
+            return json_loads(response.read())
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+
+
 @app.get("/api/live")
 def live():
-    dashboard = fetch_json("/api/dashboard")
+    # GCS 우선 fetch (최신 데이터 보유)
+    dashboard = fetch_gcs("/api/dashboard")
     if dashboard is None:
-        # Mission Control 불가 시 Router 직수신 데이터로 fallback
+        # GCS 불가 시 Upper C2/BMS fallback
+        dashboard = fetch_json("/api/dashboard")
+    if dashboard is None:
         return jsonify({
             "status": "degraded",
-            "message": "mission-control unavailable (router direct)",
+            "message": "GCS / Upper C2 unavailable (direct UDP only)",
             "platforms": list(router_platforms.values()),
             "events": [],
         })
-    # Mission Control 데이터 + Router 직수신 병합 (router 우선)
+    # 플랫폼: GCS + UDP 직수신 병합 (UDP 직수신 우선)
     mc_platforms = {p["platform_id"]: p for p in dashboard.get("platforms", [])}
     merged = {**mc_platforms, **router_platforms}
+
+    # 이벤트: GCS 이벤트 + UGV 로컬 이벤트 병합 후 시간순 정렬
+    gcs_events = dashboard.get("events", [])
+    merged_events = list(gcs_events) + list(local_events)
+    merged_events.sort(key=lambda e: e.get("time", ""), reverse=True)
+
     return jsonify({
         "status": "ok",
         **dashboard,
         "platforms": list(merged.values()),
-        "router_direct": len(router_platforms),
+        "events":    merged_events[:50],
+        "gcs_direct": len(router_platforms),
     })
 
 

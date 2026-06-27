@@ -12,27 +12,27 @@ from pymavlink import mavutil
 
 MAVLINK_HOST = "0.0.0.0"
 MAVLINK_PORT = int(os.getenv("MAVLINK_PORT",  "14550"))
-ROUTER_HOST  = os.getenv("ROUTER_HOST",  "tactical-router")
-ROUTER_PORT  = int(os.getenv("ROUTER_PORT",  "14555"))   # CC → Router 텔레메트리
-CMD_PORT     = int(os.getenv("CMD_PORT",  "14552"))       # Router → CC 명령 수신
+GCS_HOST     = os.getenv("GCS_HOST",  "dah-gcs")
+GCS_PORT     = int(os.getenv("GCS_PORT",  "14555"))       # CC → GCS 텔레메트리
+CMD_PORT     = int(os.getenv("CMD_PORT",  "14552"))        # GCS → CC 명령 수신
 UAV_HOST     = os.getenv("UAV_HOST",  "172.20.0.10")
 UAV_CMD_PORT = int(os.getenv("UAV_CMD_PORT", "14551"))
 PLATFORM_ID  = "UAV-001"
 SYS_ID       = 1
 
 state = {}
-router_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+gcs_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
-def send_to_router(payload):
+def send_to_gcs(payload):
     try:
-        router_sock.sendto(json.dumps(payload).encode("utf-8"), (ROUTER_HOST, ROUTER_PORT))
+        gcs_sock.sendto(json.dumps(payload).encode("utf-8"), (GCS_HOST, GCS_PORT))
     except Exception as e:
-        print(f"[CC] Router 전송 실패: {e}")
+        print(f"[CC] GCS 전송 실패: {e}")
 
 
 def listen_commands():
-    """Router → CC → UAV FC 명령 경로"""
+    """GCS → CC → UAV FC 명령 경로"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", CMD_PORT))
     mav_fc = mavutil.mavlink_connection(
@@ -82,8 +82,8 @@ def main():
     mav = mavutil.mavlink_connection(f"udpin:{MAVLINK_HOST}:{MAVLINK_PORT}")
     print("[CC] Companion Computer 시작")
     print(f"[CC] MAVLink 수신 ← {MAVLINK_HOST}:{MAVLINK_PORT}  (UAV FC 브로드캐스트)")
-    print(f"[CC] Telemetry 전송 → {ROUTER_HOST}:{ROUTER_PORT}  (Tactical Router)")
-    print(f"[CC] Command 수신 → 포트 {CMD_PORT}  (Router → CC)")
+    print(f"[CC] Telemetry 전송 → {GCS_HOST}:{GCS_PORT}  (GCS)")
+    print(f"[CC] Command 수신 → 포트 {CMD_PORT}  (GCS → CC)")
     print("-" * 50)
 
     while True:
@@ -121,8 +121,8 @@ def main():
                     **state,
                     "timestamp": time.time(),
                 }
-                send_to_router(payload)
-                print(f"[CC] → Router {ROUTER_HOST}:{ROUTER_PORT}  SEQ={seq}")
+                send_to_gcs(payload)
+                print(f"[CC] → GCS {GCS_HOST}:{GCS_PORT}  SEQ={seq}")
 
 
 if __name__ == "__main__":
