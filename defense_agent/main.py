@@ -4,6 +4,8 @@ import socket
 import threading
 import time
 import urllib.request
+
+os.environ['MAVLINK20'] = '1'
 from pymavlink import mavutil
 from detector import detect
 from responder import respond

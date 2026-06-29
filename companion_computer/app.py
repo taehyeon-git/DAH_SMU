@@ -8,6 +8,8 @@ import os
 import socket
 import threading
 import time
+
+os.environ['MAVLINK20'] = '1'
 from pymavlink import mavutil
 
 MAVLINK_HOST = "0.0.0.0"

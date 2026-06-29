@@ -2,6 +2,8 @@ import json
 import os
 import socket
 import time
+
+os.environ['MAVLINK20'] = '1'
 from pymavlink import mavutil
 
 TARGET_HOST     = '172.20.0.10'

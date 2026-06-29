@@ -8,6 +8,11 @@ services:
     container_name: dah-uav
     depends_on:
       - dah-companion
+    environment:
+      CC_HOST: 172.20.0.30        # companion computer IP
+      CC_PORT: "14550"
+      CMD_PORT: "14551"
+      SITL_SPEEDUP: "5"
     networks:
       dah-net:
         ipv4_address: 172.20.0.10         # UAV 고정 IP
@@ -215,6 +220,24 @@ services:
     networks:
       dah-net:
         ipv4_address: 172.20.0.56
+      ops_net:
+
+  # ── Fail-safe 유도 에이전트 (정찰→HB누락→손실률→지연→간헐적)
+  dah-inducer:
+    profiles: ["cyber-lab"]
+    restart: "no"
+    build:
+      context: .
+      dockerfile: attack_agent/Dockerfile
+    container_name: dah-inducer
+    command: ["python", "failsafe_inducer.py"]
+    environment:
+      DASHBOARD_HOST: dah-dashboard
+      DASHBOARD_PORT: "14571"
+      ROUTER_HOST: dah-tactical-router
+    networks:
+      dah-net:
+        ipv4_address: 172.20.0.57
       ops_net:
 
   # ── 방어 에이전트 (탐지 + 차단)

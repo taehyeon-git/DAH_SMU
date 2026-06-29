@@ -20,6 +20,18 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from ticn import TMMRNode, TICNNetwork, SharedState
 
+# 지연 주입 상태 (delay attack)
+_delay_state = {"delay_ms": 0, "expires_at": 0.0}
+_delay_lock  = threading.Lock()
+
+
+def get_inject_delay_ms() -> int:
+    with _delay_lock:
+        if time.time() < _delay_state["expires_at"]:
+            return _delay_state["delay_ms"]
+        return 0
+
+
 # ── 포트 설정 ─────────────────────────────────────────────────────────────
 GCS_LISTEN_PORT   = int(os.getenv("GCS_LISTEN_PORT",   "14560"))  # GCS → Router (UAV 전술 릴레이)
 UGV_LISTEN_PORT   = int(os.getenv("UGV_LISTEN_PORT",   "14660"))  # UGV → Router (직접)
@@ -85,6 +97,14 @@ def make_http_handler(shared: SharedState, tmmr_nodes: dict, ticn: TICNNetwork):
                 ch = body.get("channel", "VHF")
                 shared.clear_jam(ch)
                 self._send(200, json.dumps({"ok": True, "channel": ch}).encode())
+            elif self.path == "/api/ticn/delay":
+                delay_ms = int(body.get("delay_ms", 0))
+                duration = float(body.get("duration", 0))
+                with _delay_lock:
+                    _delay_state["delay_ms"]  = delay_ms
+                    _delay_state["expires_at"] = time.time() + duration if delay_ms > 0 else 0.0
+                print(f"[TICN]  DELAY 주입: {delay_ms}ms  {duration}s")
+                self._send(200, json.dumps({"ok": True, "delay_ms": delay_ms, "duration": duration}).encode())
             else:
                 self._send(404, b'{"error":"not found"}')
 
@@ -218,6 +238,13 @@ def main():
                     pass
                 print(f"[TICN]  DROP  {pid}  LQ={lq.quality if lq else '?'}  jam={tmmr.jam_detected}")
                 continue
+
+            # 지연 주입 적용
+            inject_ms = get_inject_delay_ms()
+            if inject_ms > 0:
+                time.sleep(inject_ms / 1000.0)
+                result["cmd_latency_ms"] = inject_ms
+                print(f"[TICN]  DELAY 적용 {inject_ms}ms → {pid}")
 
             # Upper C2/BMS로 전달
             try:

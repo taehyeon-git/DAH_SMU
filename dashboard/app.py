@@ -145,6 +145,43 @@ def _router_udp_listener():
 threading.Thread(target=_router_udp_listener, daemon=True).start()
 
 
+def _gcs_heartbeat_sender():
+    """GCS → UAV 1Hz heartbeat — 정상 연결 유지 + 대시보드 로그"""
+    while True:
+        try:
+            with _mav_lock:
+                mav = get_mav()
+                mav.mav.heartbeat_send(
+                    type=mavutil.mavlink.MAV_TYPE_GCS,
+                    autopilot=mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    base_mode=0,
+                    custom_mode=0,
+                    system_status=mavutil.mavlink.MAV_STATE_ACTIVE,
+                )
+            uav = router_platforms.get("UAV-001", {})
+            local_events.appendleft({
+                "type":        "telemetry",
+                "platform_id": "UAV-001",
+                "time":        time.strftime("%H:%M:%S"),
+                "level":       "info",
+                "source":      "GCS",
+                "message":     (
+                    f"HEARTBEAT | GCS→UAV-001 | "
+                    f"mode={uav.get('mode','?')} "
+                    f"alt={uav.get('alt','?')}m "
+                    f"fuel={uav.get('fuel', uav.get('battery','?'))}%"
+                ),
+                "protocol":    "MAVLink",
+                "status":      "정상",
+            })
+        except Exception:
+            pass
+        time.sleep(1)
+
+
+threading.Thread(target=_gcs_heartbeat_sender, daemon=True).start()
+
+
 TOPOLOGY = {
     "title": "UAV/UGV 전술통신 파이프라인",
     "subtitle": "CC(UAV) 텔레메트리가 GCS로 직수신된 후 Dashboard / Collector / Router로 fan-out되고, Router가 TMMR/TICN 시뮬레이션을 통해 Upper C2/BMS로 전달합니다.",
@@ -437,6 +474,33 @@ def live():
         "agent_events":  list(agent_events)[:100],
         "gcs_direct":    len(router_platforms),
         "mission_state": mission_state,
+    })
+
+
+@app.get("/api/failsafe")
+def failsafe_policy():
+    """정찰 에이전트가 수집하는 fail-safe 정책값 노출 엔드포인트"""
+    return jsonify({
+        "heartbeat": {
+            "interval_sec":      1,
+            "timeout_sec":       5,
+            "max_miss_count":    5,
+            "last_hb_time":      router_platforms.get("UAV-001", {}).get("time", None),
+        },
+        "packet_loss": {
+            "normal_pct":            0,
+            "warning_pct":           10,
+            "critical_pct":          15,   # mock_uav.py LINK_LOST_THRESHOLD
+            "critical_duration_sec": 2,
+        },
+        "latency": {
+            "normal_ms":   50,
+            "warning_ms":  500,
+            "critical_ms": 1500,
+        },
+        "failsafe_action":  "LOITER",
+        "rtb_on_prolonged": True,
+        "loiter_restore_ticks": 3,
     })
 
 

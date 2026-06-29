@@ -40,7 +40,11 @@ WAYPOINTS = [
 LAT_PER_M = 1 / 111_000
 LON_PER_M = 1 / (111_000 * math.cos(math.radians(37.9)))
 
-status = {'mode': 'MISSION', 'alt': ALTITUDE}  # MISSION | LANDING | RTL | LOITER
+status = {'mode': 'MISSION', 'alt': ALTITUDE}  # MISSION | LANDING | RTL | LOITER | PAUSED
+
+# GCS heartbeat 감시용
+_gcs_hb_last  = time.time()
+GCS_HB_TIMEOUT = 5.0   # 이 시간 동안 GCS heartbeat 없으면 fail-safe
 
 
 def link_monitor():
@@ -69,14 +73,42 @@ def link_monitor():
             pass
 
 
+def gcs_heartbeat_watchdog():
+    """GCS heartbeat timeout 감시 — 5초 이상 없으면 LOITER fail-safe"""
+    while True:
+        time.sleep(1)
+        elapsed = time.time() - _gcs_hb_last
+        if elapsed > GCS_HB_TIMEOUT and status['mode'] == 'MISSION':
+            print(f"[송골매] 🚨 GCS Heartbeat 없음 {elapsed:.1f}s → Fail-safe LOITER")
+            status['mode'] = 'LOITER'
+
+
 def listen_for_commands():
+    global _gcs_hb_last
     cmd_conn = mavutil.mavlink_connection(f'udpin:0.0.0.0:{CMD_PORT}')
     print(f"[송골매] 명령 수신 대기 중 → 포트 {CMD_PORT}")
     while True:
-        msg = cmd_conn.recv_match(type='COMMAND_LONG', blocking=True)
+        msg = cmd_conn.recv_match(type=['COMMAND_LONG', 'HEARTBEAT'], blocking=True)
         if msg is None:
             continue
+        msg_type = msg.get_type()
         src = msg.get_srcSystem()
+
+        # GCS heartbeat 수신 → 타임스탬프 갱신
+        if msg_type == 'HEARTBEAT' and src == 255:
+            _gcs_hb_last = time.time()
+            gcs_status = msg.system_status
+            if gcs_status == mavutil.mavlink.MAV_STATE_CRITICAL:
+                print(f"[송골매] ⚠️  GCS CRITICAL 상태 수신 → Fail-safe LOITER")
+                status['mode'] = 'LOITER'
+            elif gcs_status == mavutil.mavlink.MAV_STATE_EMERGENCY:
+                print(f"[송골매] 🚨 GCS EMERGENCY 수신 → Fail-safe RTL")
+                status['mode'] = 'RTL'
+            continue
+
+        if msg_type != 'COMMAND_LONG':
+            continue
+
         cmd = msg.command
         if cmd == mavutil.mavlink.MAV_CMD_NAV_LAND:
             print(f"[송골매] ⚠️  LAND 명령 수신 SYS_ID={src} → 착륙 시작")
@@ -112,8 +144,9 @@ def heading_deg(lat1, lon1, lat2, lon2):
 
 
 def main():
-    threading.Thread(target=listen_for_commands, daemon=True).start()
-    threading.Thread(target=link_monitor, daemon=True).start()
+    threading.Thread(target=listen_for_commands,      daemon=True).start()
+    threading.Thread(target=link_monitor,             daemon=True).start()
+    threading.Thread(target=gcs_heartbeat_watchdog,   daemon=True).start()
 
     mav = mavutil.mavlink_connection(f'udpout:{UAV_HOST}:{UAV_PORT}', source_system=SYS_ID)
     mav.port.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

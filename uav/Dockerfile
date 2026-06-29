@@ -1,16 +1,21 @@
-# 베이스 이미지: Python 3.11 (가벼운 버전)
-FROM python:3.11-slim
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
 
-# 컨테이너 안 작업 폴더 설정
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip wget \
+    libexpat1 libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install pymavlink
+
+# ArduPilot SITL 바이너리 (x86_64 Linux 프리빌드)
+RUN wget -q \
+    https://firmware.ardupilot.org/Plane/stable/SITL_x86_64_linux_gnu/arduplane \
+    -O /usr/local/bin/arduplane \
+    && chmod +x /usr/local/bin/arduplane
+
 WORKDIR /app
+COPY uav/sitl_runner.py .
 
-# requirements.txt 먼저 복사 + 설치
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-# mock_uav.py 복사
-COPY uav/mock_uav.py .
-
-# 실행 명령어
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "mock_uav.py"]
+CMD ["python3", "sitl_runner.py"]

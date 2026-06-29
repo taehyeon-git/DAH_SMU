@@ -18,7 +18,7 @@ DASHBOARD_URL  = f"http://{DASHBOARD_HOST}:8080"
 # 스푸핑 목표: 정찰 경로 북쪽 허가구역 외 (북한 접경 방향)
 SPOOF_TARGET_LAT = 38.50
 SPOOF_TARGET_LON = 126.60
-SPOOF_STEP       = 0.004   # 도/스텝 — 0.5s 주기로 ~440m 이동 → 탐지 가능한 비정상 속도
+SPOOF_STEP       = 0.004   # 도/스텝 — 0.25s 주기로 ~440m 이동 → 탐지 가능한 비정상 속도
 SPOOF_INTERVAL   = 0.25    # 초 — 정상 CC 텔레메트리보다 빠르게 주입
 
 _gcs_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -93,12 +93,12 @@ def main():
         else:
             print("[SPOOFER] 목표 좌표 도달 — 위치 유지")
 
-        # Companion 포맷을 가장하되, GCS가 시나리오 이벤트로 식별할 수 있게 태그를 남김
+        # Companion Computer와 동일한 포맷으로 위장하되, 시뮬레이터 내부 탐지 태그만 추가
         payload = {
             "platform_id":   "UAV-001",
             "platform_type": "UAV",
             "message_type":  "telemetry",
-            "source":        "attack_agent/GPS_SPOOFER",
+            "source":        "companion_computer/MAVLink",
             "attack_type":   "GPS_SPOOF",
             "seq":           seq,
             "sys_id":        1,
