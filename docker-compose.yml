@@ -151,7 +151,7 @@ services:
       dah-net:
         ipv4_address: 172.20.0.70
 
-  # ── 정찰 에이전트 (도청)
+  # ── 정찰 에이전트 (Passive MAVLink Recon — Low-Privilege Sentinel)
   dah-recon:
     profiles: ["cyber-lab"]
     restart: "no"
@@ -159,9 +159,26 @@ services:
       context: .
       dockerfile: attack_agent/Dockerfile
     container_name: dah-recon
+    command:
+      - python
+      - recon.py
+      - --listen-host
+      - "0.0.0.0"
+      - --listen-port
+      - "14550"
+      - --duration-s
+      - "120"
+      - --revalidate-s
+      - "20"
+      - --prediction-horizon-s
+      - "60"
+      - --output
+      - /app/output/passive_mavlink_intel.json
     environment:
       DASHBOARD_HOST: dah-dashboard
       DASHBOARD_PORT: "14571"
+    volumes:
+      - ./output:/app/output
     networks:
       dah-net:
         ipv4_address: 172.20.0.40
