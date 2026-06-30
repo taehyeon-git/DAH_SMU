@@ -1,0 +1,199 @@
+<!-- 대시보드1: MAP (좌) + [Mission State / Payload / Commands] (우) -->
+<div class="row-top">
+
+  <!-- ── 지도 ── -->
+  <div class="card" style="display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div class="map-header" style="padding:10px 14px 0">
+      <div class="card-title" style="margin-bottom:0">MAP / 작전 구역</div>
+    </div>
+    <div style="display:flex;flex:1;min-height:0;gap:0">
+      <div style="position:relative;flex:1;min-width:0">
+        <div id="leaflet-map" style="width:100%;height:100%"></div>
+        <div class="map-legend">
+          <div class="leg-row"><div class="leg-line" style="background:#2563eb"></div>UAV 경로</div>
+          <div class="leg-row"><div class="leg-line" style="background:#16a34a"></div>UGV 경로</div>
+          <div class="leg-row"><div class="leg-dot"></div>Waypoint</div>
+          <div class="leg-row"><div class="leg-zone" style="background:rgba(239,68,68,0.25);border:1.5px dashed #ef4444"></div>목표 구역</div>
+          <div class="leg-row"><div class="leg-zone" style="background:rgba(234,88,12,0.22);border:1.5px solid #ea580c"></div>위협 구역</div>
+          <div class="leg-row"><div class="leg-zone" style="background:rgba(234,179,8,0.15);border:1.5px dashed #ca8a04"></div>통신 악화 구역</div>
+          <div class="leg-row"><div class="leg-zone" style="background:rgba(37,99,235,0.15);border:1.5px solid #2563eb"></div>UGV 작전 구역</div>
+        </div>
+      </div>
+      <div class="map-side-panel">
+        <div class="msp-section">
+          <div class="msp-title msp-uav">
+            <span class="msp-dot" id="msp-uav-dot"></span>UAV-001
+          </div>
+          <div class="msp-row"><span class="msp-lbl">프로토콜</span><span class="badge b-mav" style="font-size:9px">MAVLink / UDP</span></div>
+          <div class="msp-row"><span class="msp-lbl">모드</span><span class="msp-val">AUTO</span></div>
+          <div class="msp-row"><span class="msp-lbl">고도</span><span class="msp-val" id="msp-uav-alt">-- m</span></div>
+          <div class="msp-row"><span class="msp-lbl">속도</span><span class="msp-val" id="msp-uav-spd">-- m/s</span></div>
+          <div class="msp-row"><span class="msp-lbl">방향</span><span class="msp-val" id="msp-uav-hdg">--°</span></div>
+          <div class="msp-row"><span class="msp-lbl">배터리</span>
+            <div class="batt" style="flex:1"><div class="batt-bar"><span id="msp-uav-fuel-bar" style="width:78%"></span></div><span id="msp-uav-fuel">78%</span></div>
+          </div>
+          <div class="msp-row"><span class="msp-lbl">링크</span>
+            <span class="msp-signal" id="msp-uav-signal">
+              <span class="sig-bar s1"></span><span class="sig-bar s2"></span><span class="sig-bar s3"></span><span class="sig-bar s4"></span>
+            </span>
+            <span class="msp-val" id="msp-uav-link-txt">양호</span>
+          </div>
+          <div class="msp-row msp-coord"><span class="msp-lbl">좌표</span>
+            <span class="msp-val" style="font-size:10px;line-height:1.5">
+              <span id="msp-uav-lat">--</span> N<br><span id="msp-uav-lon">--</span> E
+            </span>
+          </div>
+        </div>
+        <div class="msp-divider"></div>
+        <div class="msp-section">
+          <div class="msp-title msp-ugv">
+            <span class="msp-dot msp-dot-g" id="msp-ugv-dot"></span>UGV-001
+          </div>
+          <div class="msp-row"><span class="msp-lbl">프로토콜</span><span class="badge b-ros" style="font-size:9px">ROS2 / MQTT</span></div>
+          <div class="msp-row"><span class="msp-lbl">모드</span><span class="msp-val">AUTO</span></div>
+          <div class="msp-row"><span class="msp-lbl">속도</span><span class="msp-val" id="msp-ugv-spd">-- m/s</span></div>
+          <div class="msp-row"><span class="msp-lbl">배터리</span>
+            <div class="batt" style="flex:1"><div class="batt-bar"><span id="msp-ugv-bat-bar" style="width:82%"></span></div><span id="msp-ugv-bat">82%</span></div>
+          </div>
+          <div class="msp-row"><span class="msp-lbl">링크</span>
+            <span class="msp-signal" id="msp-ugv-signal">
+              <span class="sig-bar s1"></span><span class="sig-bar s2"></span><span class="sig-bar s3"></span><span class="sig-bar s4"></span>
+            </span>
+            <span class="msp-val" id="msp-ugv-link-txt">양호</span>
+          </div>
+          <div class="msp-row msp-coord"><span class="msp-lbl">좌표</span>
+            <span class="msp-val" style="font-size:10px;line-height:1.5">
+              <span id="msp-ugv-lat">--</span> N<br><span id="msp-ugv-lon">--</span> E
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 우측 컬럼 ── -->
+  <div style="display:flex;flex-direction:column;gap:10px;min-height:0;overflow:hidden">
+
+    <!-- Mission State -->
+    <div class="card msn-card">
+      <div class="card-title" style="margin-bottom:8px">Mission State</div>
+      <div class="msn-body">
+        <!-- 좌: 단계 + 메타 -->
+        <div class="msn-left">
+          <div class="msn-phase-lbl">현재 임무 단계</div>
+          <div class="msn-phase" id="msn-phase">EN_ROUTE</div>
+          <div class="msn-meta">
+            <div class="msn-meta-row"><span>임무 ID</span><span id="msn-id">MSN-2026-0627-01</span></div>
+            <div class="msn-meta-row"><span>경과 시간</span><span id="msn-elapsed">00:00:00</span></div>
+            <div class="msn-meta-row"><span>시작 시간</span><span id="msn-start">--:--:--</span></div>
+          </div>
+        </div>
+        <!-- 우: 설명 + 권장조치 + 버튼 -->
+        <div class="msn-right">
+          <div>
+            <div class="msn-sub-lbl">상태 설명</div>
+            <div class="msn-desc" id="msn-desc">목표 지역으로 이동 중</div>
+          </div>
+          <div>
+            <div class="msn-sub-lbl">권장 조치</div>
+            <div class="msn-advice" id="msn-advice">경로 유지 및 주변 감시 지속</div>
+          </div>
+          <div class="msn-actions">
+            <button class="msn-btn msn-btn-primary" onclick="sendMsnCmd('HOLD')">경로 유지</button>
+            <button class="msn-btn" onclick="sendMsnCmd('MONITOR')">감시 강화</button>
+            <button class="msn-btn msn-btn-warn" onclick="sendMsnCmd('PAUSE')">임무 일시정지</button>
+            <button class="msn-btn" onclick="sendMsnCmd('RESUME')" style="background:#dcfce7;color:#15803d;border-color:#86efac">임무 재개</button>
+            <button class="msn-btn msn-btn-warn" onclick="sendMsnCmd('RTB')" style="background:#fee2e2;color:#dc2626;border-color:#fca5a5">귀환 (RTB)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 하단: Payload (좌) + 최근 명령 (우) -->
+    <div style="display:flex;gap:10px;height:280px;flex-shrink:0">
+
+      <!-- Payload Video (작게) -->
+      <div class="card" style="flex:1.1;min-width:0;display:flex;flex-direction:column;padding:0;overflow:hidden">
+        <div class="map-header" style="padding:8px 12px 6px;flex-shrink:0">
+          <div class="card-title" style="margin-bottom:0;font-size:11px">Payload Video</div>
+          <div class="map-tabs" style="gap:3px">
+            <button class="active" style="font-size:10px;padding:2px 8px" onclick="switchCam(this,'uav')">UAV-001 CAM</button>
+            <button style="font-size:10px;padding:2px 8px" onclick="switchCam(this,'ugv')">UGV-001 CAM</button>
+          </div>
+        </div>
+        <div class="vid-wrap" style="flex:1;height:auto;border-radius:0;border:none;border-top:1px solid #1e2a1e">
+          <div id="cam-uav" class="cam-layer">
+            <div id="cam-uav-map" class="cam-map"></div>
+            <div class="cam-hud">
+              <div class="cam-hud-tl">
+                <div>UAV-001 / CAM-1 / EO</div>
+                <div id="hud-alt">ALT: --m  SPD: --m/s</div>
+                <div id="hud-uav-hdg">HDG: --°  FUEL: --%</div>
+                <div id="hud-uav-coord">--N  --E</div>
+              </div>
+              <div class="cam-hud-tr">
+                <div id="hud-ts-uav">--:--:--</div>
+                <div id="hud-date-uav">2026.06.27</div>
+                <div class="hud-rec">● REC</div>
+                <div>ZOOM ×2.0</div>
+              </div>
+              <div class="cam-hud-bl">
+                <div>BATT: 78%  LINK: TICN</div>
+                <div class="hud-warn">TGT LOCK</div>
+              </div>
+              <div class="cam-hud-br">
+                <div>MISSION: RECON</div>
+                <div>STATUS: AUTO</div>
+              </div>
+              <div class="cam-crosshair"><div class="ch-h"></div><div class="ch-v"></div></div>
+              <div class="cam-tgt"></div>
+              <div class="cam-corner cam-corner-tl"></div><div class="cam-corner cam-corner-tr"></div>
+              <div class="cam-corner cam-corner-bl"></div><div class="cam-corner cam-corner-br"></div>
+              <div class="cam-scanlines"></div>
+            </div>
+          </div>
+          <div id="cam-ugv" class="cam-layer" style="display:none">
+            <div id="cam-ugv-map" class="cam-map"></div>
+            <div class="cam-hud">
+              <div class="cam-hud-tl">
+                <div>UGV-001 / CAM-F / EO-IR</div>
+                <div id="hud-spd">SPD: --m/s  HDG: --°</div>
+                <div id="hud-ugv-coord">--N  --E</div>
+              </div>
+              <div class="cam-hud-tr">
+                <div id="hud-ts-ugv">--:--:--</div>
+                <div>2026.06.27</div>
+                <div class="hud-rec">● REC</div>
+                <div>ZOOM ×1.0</div>
+              </div>
+              <div class="cam-hud-bl">
+                <div>BATT: 82%  LINK: TICN/CNRS</div>
+                <div>MISSION: GROUND_RECON</div>
+              </div>
+              <div class="cam-hud-br">
+                <div>TERRAIN: URBAN</div>
+                <div>STATUS: AUTO</div>
+              </div>
+              <div class="cam-crosshair"><div class="ch-h"></div><div class="ch-v"></div></div>
+              <div class="cam-corner cam-corner-tl"></div><div class="cam-corner cam-corner-tr"></div>
+              <div class="cam-corner cam-corner-bl"></div><div class="cam-corner cam-corner-br"></div>
+              <div class="cam-scanlines"></div>
+            </div>
+          </div>
+          <div class="vid-live">● LIVE</div>
+        </div>
+      </div>
+
+      <!-- 최근 명령 -->
+      <div class="card cmd-card" style="flex:0.85;min-width:0">
+        <div class="card-title" style="margin-bottom:8px">최근 명령</div>
+        <div id="cmd-log" class="cmd-log"></div>
+        <div class="cmd-more">
+          <button onclick="alert('전체 명령 로그는 준비 중입니다.')">더보기 ›</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>

@@ -1,0 +1,1030 @@
+<script>
+  function tick() {
+    const n = new Date();
+    const t = n.toTimeString().slice(0,8);
+    const cl = document.getElementById('clock'); if (cl) cl.textContent = t;
+    const cd = document.getElementById('clockDate'); if (cd) cd.textContent = n.toISOString().slice(0,10).replace(/-/g,'.');
+    const vc1 = document.getElementById('vid-clock');
+    const vc2 = document.getElementById('vid-clock2');
+    if (vc1) vc1.textContent = t;
+    if (vc2) vc2.textContent = t;
+  }
+  tick(); setInterval(tick, 1000);
+
+  // ── Payload 카메라 ────────────────────────────────────────────────────
+  function switchCam(el, cam) {
+    el.closest('.map-tabs').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('cam-uav').style.display = cam === 'uav' ? 'block' : 'none';
+    document.getElementById('cam-ugv').style.display = cam === 'ugv' ? 'block' : 'none';
+    if (cam === 'uav') { setTimeout(() => camUAV.invalidateSize(), 50); }
+    else               { setTimeout(() => camUGV.resize(), 50); }
+  }
+
+  const SAT = () => L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: '', maxZoom: 20, maxNativeZoom: 19 }
+  );
+
+  // UAV 캠 — 실제 UAV 좌표 추종 항공 하향 시점
+  const camUAV = L.map('cam-uav-map', {
+    zoomControl: false, attributionControl: false,
+    dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+    keyboard: false, touchZoom: false, boxZoom: false,
+  }).setView([37.895, 126.800], 14);
+  SAT().addTo(camUAV);
+  setTimeout(() => camUAV.invalidateSize(), 100);
+
+  // 실제 UAV 위치로 카메라 부드럽게 이동 — 데이터 주기(1.5s)마다 1회 호출
+  function updateCamUAV(u) {
+    if (!u || u.lat == null) return;
+    camUAV.panTo([u.lat, u.lon], { animate: true, duration: 1.4, easeLinearity: 1.0 });
+
+    const el = document.getElementById('hud-alt');
+    if (el) el.textContent = `ALT: ${u.alt ?? '--'}m  SPD: ${u.speed ?? '--'}m/s`;
+
+    const coord = document.getElementById('hud-uav-coord');
+    if (coord) coord.textContent = `${u.lat.toFixed(4)}N  ${u.lon.toFixed(4)}E`;
+
+    const hdg = document.getElementById('hud-uav-hdg');
+    if (hdg) hdg.textContent = `HDG: ${u.hdg != null ? Math.round(u.hdg) : '--'}°  FUEL: ${u.fuel ?? '--'}%`;
+  }
+
+  // UGV 캠 — MapLibre GL pitch 65° 전방 시점
+  const UGV_ROUTE = [
+    [126.9815, 37.5696], [126.9818, 37.5699], [126.9822, 37.5702],
+    [126.9825, 37.5705], [126.9821, 37.5707], [126.9817, 37.5704],
+    [126.9814, 37.5700], [126.9815, 37.5696],
+  ];
+  function calcBearing(a, b) {
+    const dLng = (b[0] - a[0]) * Math.PI / 180;
+    const lat1 = a[1] * Math.PI / 180, lat2 = b[1] * Math.PI / 180;
+    const y = Math.sin(dLng) * Math.cos(lat2);
+    const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLng);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  const camUGV = new maplibregl.Map({
+    container: 'cam-ugv-map',
+    style: {
+      version: 8,
+      sources: {
+        sat: { type: 'raster', tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19 },
+        ofm: { type: 'vector', url: 'https://tiles.openfreemap.org/planet' },
+      },
+      layers: [
+        { id: 'bg', type: 'background', paint: { 'background-color': '#111' } },
+        { id: 'sat', type: 'raster', source: 'sat' },
+        { id: 'road', type: 'line', source: 'ofm', 'source-layer': 'transportation', minzoom: 14,
+          filter: ['in', ['get', 'class'], ['literal', ['primary','secondary','tertiary','residential','service']]],
+          paint: { 'line-color': 'rgba(255,255,200,0.35)', 'line-width': 2 } },
+        { id: 'buildings-3d', type: 'fill-extrusion', source: 'ofm', 'source-layer': 'building', minzoom: 14,
+          paint: {
+            'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], ['get', 'height'], 8], 0, 'rgba(60,60,70,0.82)', 20, 'rgba(75,75,85,0.82)', 60, 'rgba(90,90,105,0.82)'],
+            'fill-extrusion-height': ['coalesce', ['get', 'render_height'], ['get', 'height'], 8],
+            'fill-extrusion-base': 0, 'fill-extrusion-opacity': 0.82,
+          } },
+      ],
+    },
+    center: UGV_ROUTE[0], zoom: 20, pitch: 78,
+    bearing: calcBearing(UGV_ROUTE[0], UGV_ROUTE[1]),
+    interactive: false, attributionControl: false,
+  });
+
+  let ugvRouteIdx = 0, ugvFrac = 0;
+  function startUGVDrive() {
+    setInterval(() => {
+      ugvFrac += 0.018;
+      if (ugvFrac >= 1) { ugvFrac = 0; ugvRouteIdx = (ugvRouteIdx + 1) % (UGV_ROUTE.length - 1); }
+      const a = UGV_ROUTE[ugvRouteIdx], b = UGV_ROUTE[ugvRouteIdx + 1];
+      const lng = a[0] + (b[0] - a[0]) * ugvFrac;
+      const lat = a[1] + (b[1] - a[1]) * ugvFrac;
+      const jitter = 0.000008;
+      const bearing = calcBearing(a, b);
+      camUGV.jumpTo({
+        center: [lng + (Math.random()-0.5)*jitter, lat + (Math.random()-0.5)*jitter],
+        bearing: bearing + (Math.random()-0.5)*1.2,
+        pitch: 78 + (Math.random()-0.5)*1.2,
+      });
+      const spd = (2.1 + Math.sin(Date.now()*0.0004)*0.2).toFixed(1);
+      const el = document.getElementById('hud-spd');
+      if (el) el.textContent = `SPD: ${spd}m/s  HDG: ${Math.round(bearing)}°`;
+    }, 150);
+  }
+  camUGV.on('load', startUGVDrive);
+
+  function updateCamTS() {
+    const t = new Date().toTimeString().slice(0,8);
+    const u = document.getElementById('hud-ts-uav');
+    const g = document.getElementById('hud-ts-ugv');
+    if (u) u.textContent = t;
+    if (g) g.textContent = t;
+  }
+  setInterval(updateCamTS, 1000);
+
+  // ── Leaflet 메인 맵 ───────────────────────────────────────────────────
+  const CENTER = [37.9, 126.84];
+  const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap', maxZoom: 19 });
+  const satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: '© Esri', maxZoom: 19 });
+  const map = L.map('leaflet-map', { zoomControl: false, layers: [satLayer] }).setView(CENTER, 12);
+  L.control.zoom({ position: 'topright' }).addTo(map);
+
+  // mock_uav.py 웨이포인트와 동일
+  const UAV_WPS = [
+    [37.895, 126.800],
+    [37.945, 126.820],
+    [37.955, 126.870],
+    [37.930, 126.910],
+    [37.885, 126.905],
+    [37.860, 126.855],
+    [37.870, 126.810],
+  ];
+  L.polyline([...UAV_WPS, UAV_WPS[0]], {
+    color: '#2563eb', weight: 2, dashArray: '6,5', opacity: 0.55
+  }).addTo(map);
+
+  function makeWpIcon(label) {
+    return L.divIcon({
+      html: `<div style="position:relative;width:20px;height:26px">
+        <svg viewBox="0 0 20 26" width="20" height="26" xmlns="http://www.w3.org/2000/svg">
+          <path d="M10 0C5.03 0 1 4.03 1 9c0 7 9 17 9 17s9-10 9-17C19 4.03 14.97 0 10 0z" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+          <circle cx="10" cy="9" r="4" fill="#2563eb"/>
+        </svg>
+        <span style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+          background:rgba(255,255,255,0.92);border:1px solid #dde1ea;border-radius:3px;
+          font-size:9px;font-weight:700;padding:1px 4px;white-space:nowrap;color:#1a1a2e;
+          box-shadow:0 1px 3px rgba(0,0,0,.2)">${label}</span>
+      </div>`,
+      className: '', iconSize: [20, 26], iconAnchor: [10, 26]
+    });
+  }
+  UAV_WPS.forEach((wp, i) => L.marker(wp, { icon: makeWpIcon(`WP${i+1}`) }).addTo(map));
+
+  // ── 작전 구역 오버레이 ────────────────────────────────────────────────
+  // 목표 구역 (WP5 인근) — 빨간 점선 원
+  L.circle([37.885, 126.905], {
+    radius: 1400, color: '#ef4444', weight: 2,
+    dashArray: '8,6', fillColor: '#ef4444', fillOpacity: 0.12
+  }).addTo(map).bindTooltip('목표 구역', { permanent: false, className: 'wp-tooltip' });
+
+  // 위협 구역 (WP3 인근) — 주황 실선 원
+  L.circle([37.952, 126.870], {
+    radius: 1000, color: '#ea580c', weight: 2,
+    fillColor: '#ea580c', fillOpacity: 0.18
+  }).addTo(map).bindTooltip('위협 구역', { permanent: false, className: 'wp-tooltip' });
+
+  // 통신 악화 구역 (우측 상단) — 노란 점선 원
+  L.circle([37.960, 126.930], {
+    radius: 1200, color: '#ca8a04', weight: 2,
+    dashArray: '6,5', fillColor: '#eab308', fillOpacity: 0.10
+  }).addTo(map).bindTooltip('통신 악화 구역', { permanent: false, className: 'wp-tooltip' });
+
+  // UGV 작전 구역 — 파란 반투명 폴리곤
+  L.polygon([
+    [37.870, 126.760], [37.870, 126.820],
+    [37.840, 126.820], [37.840, 126.760],
+  ], {
+    color: '#2563eb', weight: 1.5,
+    fillColor: '#2563eb', fillOpacity: 0.10
+  }).addTo(map).bindTooltip('UGV 작전 구역', { permanent: false, className: 'wp-tooltip' });
+
+  // UAV — 송골매 실사 이미지 마커
+  // 탑다운 이미지: 기수가 아래(South=180°) → CSS rotate = HDG + 180
+  const uavIcon = L.divIcon({
+    html: `<div id="uav-icon-wrap" style="position:relative;width:90px;height:90px;overflow:visible">
+      <div style="position:absolute;inset:0;border-radius:50%;background:rgba(37,99,235,0.08);animation:mapPulse 2s infinite"></div>
+      <img id="uav-img" src="/static/songolmae.png"
+           style="width:90px;height:90px;object-fit:contain;
+                  position:absolute;top:0;left:0;
+                  filter:drop-shadow(0 2px 10px rgba(0,0,0,.95));
+                  transform-origin:45px 45px;
+                  transition:transform 0.5s ease"/>
+    </div>`,
+    className: '', iconSize: [90, 90], iconAnchor: [45, 45]
+  });
+
+  // UGV — SHERPA 실사 이미지 마커
+  const ugvIcon = L.divIcon({
+    html: `<div id="ugv-icon-wrap" style="position:relative;width:104px;height:74px;overflow:visible">
+      <div style="position:absolute;left:16px;top:16px;width:64px;height:42px;border-radius:50%;
+                  background:rgba(22,163,74,0.14);animation:mapPulse 2.4s infinite"></div>
+      <img id="ugv-img" src="/static/ugv-sherpa.png?v=2"
+           style="width:104px;height:74px;object-fit:contain;
+                  position:absolute;top:0;left:0;
+                  filter:drop-shadow(0 4px 9px rgba(0,0,0,.85));
+                  transform-origin:52px 37px;
+                  transition:transform 0.5s ease"/>
+    </div>`,
+    className: '', iconSize: [104, 74], iconAnchor: [52, 37]
+  });
+
+  // 실시간 갱신용 마커 및 궤적
+  let uavMk = L.marker(UAV_WPS[0], { icon: uavIcon }).addTo(map)
+    .bindTooltip('UAV-001', { permanent: true, direction: 'right', offset: [10, 0], className: 'wp-tooltip' });
+  let ugvMk = L.marker([37.9017, 126.7924], { icon: ugvIcon }).addTo(map)
+    .bindTooltip('UGV-001', { permanent: true, direction: 'right', offset: [10, 0], className: 'wp-tooltip' });
+
+  const uavPositions = [];
+  let uavTrail = L.polyline([], { color: '#2563eb', weight: 3, opacity: 0.85, lineJoin: 'round' }).addTo(map);
+
+  // ── 보간 상태
+  let uavTarget = null, uavCurr = null;
+  let ugvTarget = null, ugvCurr = null;
+  let lastTrailLL = null;
+  let uavDispHdg = 0; // 현재 표시 중인 아이콘 회전각
+  let ugvDispHdg = 90; // SHERPA 이미지 기본 방향 보정
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // 최단 각도 보간 (0↔360 경계 처리)
+  function lerpAngle(a, b, t) {
+    let d = ((b - a + 540) % 360) - 180;
+    return a + d * t;
+  }
+
+  // 두 좌표 사이의 방위각 계산 (0°=North, CW)
+  function bearingTo(lat1, lon1, lat2, lon2) {
+    const dLat = lat2 - lat1;
+    const dLon = (lon2 - lon1) * Math.cos((lat1 + lat2) / 2 * Math.PI / 180);
+    return (Math.atan2(dLon, dLat) * 180 / Math.PI + 360) % 360;
+  }
+
+  // ── 60fps 부드러운 이동 루프
+  (function animateMap() {
+    requestAnimationFrame(animateMap);
+    if (uavTarget) {
+      if (!uavCurr) uavCurr = { lat: uavTarget.lat, lon: uavTarget.lon };
+      uavCurr.lat = lerp(uavCurr.lat, uavTarget.lat, 0.07);
+      uavCurr.lon = lerp(uavCurr.lon, uavTarget.lon, 0.07);
+      uavMk.setLatLng([uavCurr.lat, uavCurr.lon]);
+
+      // 이동 방향 벡터로 회전각 계산 → 부드럽게 보간
+      const dLat = uavTarget.lat - uavCurr.lat;
+      const dLon = uavTarget.lon - uavCurr.lon;
+      if (Math.abs(dLat) > 1e-7 || Math.abs(dLon) > 1e-7) {
+        const targetHdg = bearingTo(uavCurr.lat, uavCurr.lon, uavTarget.lat, uavTarget.lon);
+        uavDispHdg = lerpAngle(uavDispHdg, targetHdg, 0.06);
+        const imgEl = document.getElementById('uav-img');
+        if (imgEl) imgEl.style.transform = `rotate(${uavDispHdg - 135}deg)`;
+      }
+
+      // 궤적
+      if (!lastTrailLL ||
+          Math.abs(uavCurr.lat - lastTrailLL[0]) > 0.00012 ||
+          Math.abs(uavCurr.lon - lastTrailLL[1]) > 0.00012) {
+        const ll = [uavCurr.lat, uavCurr.lon];
+        uavPositions.push(ll);
+        if (uavPositions.length > 800) uavPositions.shift();
+        uavTrail.setLatLngs(uavPositions);
+        lastTrailLL = ll;
+      }
+    }
+    if (ugvTarget) {
+      if (!ugvCurr) ugvCurr = { lat: ugvTarget.lat, lon: ugvTarget.lon };
+      const prevUgv = { ...ugvCurr };
+      ugvCurr.lat = lerp(ugvCurr.lat, ugvTarget.lat, 0.05);
+      ugvCurr.lon = lerp(ugvCurr.lon, ugvTarget.lon, 0.05);
+      ugvMk.setLatLng([ugvCurr.lat, ugvCurr.lon]);
+      const dLat = ugvCurr.lat - prevUgv.lat;
+      const dLon = ugvCurr.lon - prevUgv.lon;
+      if (Math.abs(dLat) > 1e-8 || Math.abs(dLon) > 1e-8) {
+        const targetHdg = bearingTo(prevUgv.lat, prevUgv.lon, ugvCurr.lat, ugvCurr.lon);
+        ugvDispHdg = lerpAngle(ugvDispHdg, targetHdg + 90, 0.08);
+        const imgEl = document.getElementById('ugv-img');
+        if (imgEl) imgEl.style.transform = `rotate(${ugvDispHdg}deg)`;
+      }
+    }
+  })();
+
+  // 신호 강도(0~4)로 사이드패널 sig-bar 칠하기
+  function setSignalBars(wrapId, level, quality) {
+    const el = document.getElementById(wrapId);
+    if (!el) return;
+    const cls = quality === 'good' ? 'on' : quality === 'warn' ? 'warn' : 'bad';
+    el.querySelectorAll('.sig-bar').forEach((bar, i) => {
+      bar.className = 'sig-bar ' + ['s1','s2','s3','s4'][i];
+      if (i < level) bar.classList.add(cls);
+    });
+  }
+
+  function isCommsLost(p) {
+    if (!p) return false;
+    const loss = Number(p.ticn?.loss_pct ?? 0);
+    const lq = Number(p.ticn?.link_quality ?? 100);
+    return !!p.comms_lost || !!p.tmmr?.blackout || loss >= 80 || lq <= 30 || p.status === 'COMMS_LOST';
+  }
+
+  // API 수신 시 목표값 업데이트 + 사이드패널 갱신
+  function updateMapMarkers(platforms) {
+    const $ = id => document.getElementById(id);
+    const setText = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+
+    const u = platforms['UAV-001'];
+    if (u && u.lat != null && u.lon != null) {
+      const uLost = isCommsLost(u);
+      uavTarget = uLost && uavCurr ? { ...u, lat: uavCurr.lat, lon: uavCurr.lon } : u;
+      updateCamUAV(u);
+      if (u.hdg != null) {
+        const imgEl = $('uav-img');
+        if (imgEl) imgEl.style.transform = `rotate(${u.hdg + 180}deg)`;
+      }
+      setText('msp-uav-lat',      u.lat.toFixed(5));
+      setText('msp-uav-lon',      u.lon.toFixed(5));
+      setText('msp-uav-alt',      (u.alt   ?? '--') + ' m');
+      setText('msp-uav-spd',      uLost ? '0 m/s' : (u.speed ?? '--') + ' m/s');
+      setText('msp-uav-hdg',      uLost ? '--°' : (u.hdg != null ? Math.round(u.hdg) : '--') + '°');
+      setText('msp-uav-fuel',     (u.fuel  ?? '--') + '%');
+      const fuelBar = $('msp-uav-fuel-bar');
+      if (fuelBar) fuelBar.style.width = (u.fuel ?? 78) + '%';
+
+      // 신호/링크 품질 (TICN loss_pct 기반)
+      const loss = u.ticn?.loss_pct ?? 0;
+      const sigLevel = uLost ? 1 : loss < 5 ? 4 : loss < 15 ? 3 : loss < 30 ? 2 : 1;
+      const sigQ     = uLost ? 'bad' : loss < 10 ? 'good' : loss < 25 ? 'warn' : 'bad';
+      setSignalBars('msp-uav-signal', sigLevel, sigQ);
+      setText('msp-uav-link-txt', uLost ? '통신불량' : loss < 10 ? '양호' : loss < 25 ? '보통' : '불량');
+
+      const dotEl = $('msp-uav-dot');
+      if (dotEl) dotEl.className = uLost ? 'msp-dot msp-dot-r' : 'msp-dot';
+
+      // GPS 스푸핑 탐지 시각화 — 궤적/마커 빨간색 + 경고 배지
+      const spoofed = !!u.gps_spoofed;
+      uavTrail.setStyle({ color: spoofed ? '#ef4444' : '#2563eb' });
+      const uavWrap = document.getElementById('uav-icon-wrap');
+      if (uavWrap) {
+        uavWrap.style.filter = spoofed
+          ? 'drop-shadow(0 0 8px #ef4444) drop-shadow(0 0 16px #ef4444)'
+          : uLost
+          ? 'drop-shadow(0 0 8px #ef4444) drop-shadow(0 0 16px rgba(239,68,68,.6))'
+          : '';
+      }
+      let spoofBadge = document.getElementById('spoof-badge');
+      if (spoofed) {
+        if (!spoofBadge) {
+          spoofBadge = document.createElement('div');
+          spoofBadge.id = 'spoof-badge';
+          spoofBadge.style.cssText = [
+            'position:fixed', 'top:60px', 'left:50%', 'transform:translateX(-50%)',
+            'z-index:9999', 'background:#ef4444', 'color:#fff',
+            'padding:6px 18px', 'border-radius:6px', 'font-size:13px',
+            'font-weight:700', 'letter-spacing:.5px',
+            'box-shadow:0 0 20px rgba(239,68,68,.6)',
+            'animation:spoof-blink 0.8s step-start infinite',
+          ].join(';');
+          document.body.appendChild(spoofBadge);
+          const style = document.createElement('style');
+          style.textContent = '@keyframes spoof-blink{0%,100%{opacity:1}50%{opacity:.3}}';
+          document.head.appendChild(style);
+        }
+        const spd = u.implied_speed_kmh ? ` (${u.implied_speed_kmh}km/h)` : '';
+        spoofBadge.textContent = `⚠ GPS 좌표 위조 탐지${spd} — 관성항법 전환 중`;
+      } else if (spoofBadge) {
+        spoofBadge.remove();
+      }
+    }
+
+    const g = platforms['UGV-001'];
+    if (g && g.lat != null && g.lon != null) {
+      ugvTarget = g;
+      setText('msp-ugv-lat',     g.lat.toFixed(5));
+      setText('msp-ugv-lon',     g.lon.toFixed(5));
+      setText('msp-ugv-spd',     (g.speed   ?? '--') + ' m/s');
+      setText('msp-ugv-bat',     (g.battery ?? '--') + '%');
+      const batBar = $('msp-ugv-bat-bar');
+      if (batBar) batBar.style.width = (g.battery ?? 82) + '%';
+
+      const lossG = g.ticn?.loss_pct ?? 0;
+      const sigLG = lossG < 5 ? 4 : lossG < 15 ? 3 : lossG < 30 ? 2 : 1;
+      const sigQG = lossG < 10 ? 'good' : lossG < 25 ? 'warn' : 'bad';
+      setSignalBars('msp-ugv-signal', sigLG, sigQG);
+      setText('msp-ugv-link-txt', lossG < 10 ? '양호' : lossG < 25 ? '보통' : '불량');
+
+      const dotGEl = $('msp-ugv-dot');
+      if (dotGEl) dotGEl.className = 'msp-dot msp-dot-g';
+    }
+  }
+
+  function setTab(el) {
+    el.closest('.map-tabs').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+    const label = el.textContent.trim();
+    if (label === '위성') { map.removeLayer(osmLayer); map.addLayer(satLayer); }
+    else                  { map.removeLayer(satLayer); map.addLayer(osmLayer); }
+  }
+
+  // ── 대시보드1 통합 로그 ──────────────────────────────────────────────
+  (function initDash1Logs() {
+    const logBody  = document.getElementById('d1-log-body');
+    const logCount = document.getElementById('log-count');
+    const searchEl = document.getElementById('log-search');
+    const seen1    = new Set();
+    const lseqs1   = {};
+    let   curFilter = 'all';
+    let   curSearch = '';
+
+    // 필터 버튼 — 다중 선택 토글
+    const activeFilters = new Set(['all']);
+
+    document.querySelectorAll('.log-filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const f = btn.dataset.filter;
+        if (f === 'all') {
+          activeFilters.clear();
+          activeFilters.add('all');
+        } else {
+          activeFilters.delete('all');
+          if (activeFilters.has(f)) {
+            activeFilters.delete(f);
+            if (activeFilters.size === 0) activeFilters.add('all');
+          } else {
+            activeFilters.add(f);
+          }
+        }
+        document.querySelectorAll('.log-filter-btn').forEach(b => {
+          b.classList.toggle('active', activeFilters.has(b.dataset.filter));
+        });
+        applyFilter();
+      });
+    });
+
+    // 검색
+    if (searchEl) searchEl.addEventListener('input', () => {
+      curSearch = searchEl.value.toLowerCase();
+      applyFilter();
+    });
+
+    function rowMatchesFilter(tr) {
+      if (activeFilters.has('all')) return true;
+      const type = tr.dataset.type;  // 'tel' | 'cmd' | 'atk' | 'def'
+      const checks = [];
+      if (activeFilters.has('atk')) checks.push(type === 'atk');
+      if (activeFilters.has('def')) checks.push(type === 'def');
+      if (activeFilters.has('tel')) checks.push(type === 'tel');
+      if (activeFilters.has('cmd')) checks.push(type === 'cmd');
+      if (activeFilters.has('uav')) checks.push(tr.classList.contains('row-uav'));
+      if (activeFilters.has('ugv')) checks.push(tr.classList.contains('row-ugv'));
+      return checks.length === 0 || checks.some(Boolean);
+    }
+
+    function applyFilter() {
+      let visible = 0;
+      logBody.querySelectorAll('tr').forEach(tr => {
+        const typeMatch = rowMatchesFilter(tr);
+        const srchMatch = !curSearch || tr.textContent.toLowerCase().includes(curSearch);
+        const hide = !(typeMatch && srchMatch);
+        tr.dataset.hidden = hide ? 'true' : 'false';
+        tr.style.display  = hide ? 'none' : '';
+        if (!hide) visible++;
+      });
+      if (logCount) logCount.textContent = visible + ' rows';
+    }
+
+    const logScroll = logBody.closest('.log-scroll');
+    function addLog(html) {
+      const atBottom = !logScroll || logScroll.scrollHeight - logScroll.scrollTop - logScroll.clientHeight < 40;
+      logBody.insertAdjacentHTML('beforeend', html);
+      if (logBody.children.length > 150) logBody.firstElementChild.remove();
+      applyFilter();
+      if (atBottom && logScroll) logScroll.scrollTop = logScroll.scrollHeight;
+    }
+
+    // 헤더 칩 유틸
+    const setDot  = (id, c) => { const el = document.getElementById(id); if (el) { el.className = 'dot'; el.classList.add(c); } };
+    const setText = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+
+    // 링크 상태 유틸
+    const setLink = (stId, latId, lossId, ok, lat, loss) => {
+      const stEl = document.getElementById(stId);
+      if (stEl) { stEl.textContent = ok ? '정상' : '오프라인'; stEl.className = ok ? 'badge b-ok' : 'badge b-warn'; }
+      setText(latId,  lat  != null ? lat  + ' ms' : '-- ms');
+      setText(lossId, loss != null ? loss + ' %'  : '-- %');
+    };
+
+    async function d1Poll() {
+      let data;
+      try { data = await (await fetch('/api/live')).json(); } catch { return; }
+
+      const events       = data.events || [];
+      const agentEvents  = data.agent_events || [];
+      const platforms = {};
+      (data.platforms || []).forEach(p => { platforms[p.platform_id] = p; });
+
+      updateMapMarkers(platforms);
+      updateMissionState(data.mission_state);
+
+      const uav   = platforms['UAV-001'];
+      const ugv   = platforms['UGV-001'];
+      const isOn  = p => p && p.lat != null;
+      const sysOk = data.status === 'ok';
+
+      // 헤더 칩
+      setDot('dot-uav', isOn(uav) ? 'g' : 'r'); setText('hdr-uav', isOn(uav) ? '1/1' : '0/1');
+      setDot('dot-ugv', isOn(ugv) ? 'g' : 'r'); setText('hdr-ugv', isOn(ugv) ? '1/1' : '0/1');
+      setDot('dot-gcs', sysOk ? 'g' : 'r');     setText('hdr-gcs', sysOk ? 'Online' : 'Offline');
+      setDot('dot-c2',  sysOk ? 'g' : 'r');     setText('hdr-c2',  sysOk ? 'Online' : 'Offline');
+      if (uav?.gcs_received_at) {
+        const ms = Math.round((Date.now() / 1000 - uav.gcs_received_at) * 1000);
+        const v  = ms > 0 && ms < 9999 ? ms : null;
+        setText('hdr-latency', (v ?? '--') + ' ms');
+        setDot('dot-latency', v == null ? 'r' : v < 500 ? 'g' : 'r');
+      }
+      if (uav?.ticn) {
+        const loss = isCommsLost(uav) ? 100 : uav.ticn.loss_pct;
+        setText('hdr-loss', loss + ' %');
+        setDot('dot-loss', loss < 10 ? 'g' : loss < 25 ? 'b' : 'r');
+      }
+
+      // 링크 상태 패널 — 새 아키텍처
+      const setBadge = (id, ok, label) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = label ?? (ok ? '정상' : '오프라인');
+        el.className   = ok ? 'badge b-ok' : 'badge b-warn';
+      };
+      const age = ts => ts ? Math.round((Date.now()/1000 - ts)*1000) : null;
+
+      // CC → GCS (MAVLink/UDP)
+      const uavAge = age(uav?.gcs_received_at);
+      const uavOn  = isOn(uav) && uavAge != null && uavAge < 5000;
+      setBadge('lnk-uav-st', uavOn);
+      setText('lnk-uav-lat',  uavAge != null ? uavAge + ' ms' : '-- ms');
+      setText('lnk-uav-loss', uav?.ticn?.loss_pct != null ? uav.ticn.loss_pct + ' %' : '-- %');
+
+      // GCS → Router (TMMR/TICN) — UAV 데이터가 흐를 때 링크 활성
+      const tmmr    = uav?.tmmr;
+      const ticn    = uav?.ticn;
+      const lq      = ticn?.link_quality ?? null;
+      const uavLost = isCommsLost(uav);
+      const gcsRtOn = isOn(uav) && !uavLost && lq != null && lq > 30;
+      setBadge('lnk-gcs-rt-st', gcsRtOn, uavLost ? '두절' : undefined);
+      if (tmmr?.waveform) setText('lnk-gcs-rt-wf', tmmr.waveform);
+      setText('lnk-gcs-rt-rssi', tmmr?.rssi_dbm != null ? tmmr.rssi_dbm + ' dBm' : '-- dBm');
+      setText('lnk-gcs-rt-loss', ticn?.loss_pct  != null ? ticn.loss_pct  + ' %'  : '-- %');
+
+      // Router → Upper C2/BMS (TICN)
+      setBadge('lnk-rt-c2-st', gcsRtOn, uavLost ? '두절' : undefined);
+      setText('lnk-rt-c2-lq',   lq != null ? 'LQ ' + lq : 'LQ --');
+      setText('lnk-rt-c2-loss', ticn?.loss_pct != null ? ticn.loss_pct + ' %' : '-- %');
+
+      // C2 → Router → GCS (명령 하달 경로 — 전술망 정상 시 활성)
+      setBadge('lnk-c2-rt-st', sysOk && gcsRtOn, uavLost ? '두절' : undefined);
+
+      // UGV → Router (ROS2/JSON)
+      const ugvAge = age(ugv?.gcs_received_at);
+      const ugvOn  = isOn(ugv) && ugvAge != null && ugvAge < 5000;
+      setBadge('lnk-ugv-st', ugvOn);
+      setText('lnk-ugv-lat',  ugvAge != null ? ugvAge + ' ms' : '-- ms');
+      setText('lnk-ugv-loss', ugv?.ticn?.loss_pct != null ? ugv.ticn.loss_pct + ' %' : '-- %');
+
+      // ── TMMR / TICN 시각화 업데이트 ──────────────────────────────────
+      const rssi    = uav?.tmmr?.rssi_dbm ?? null;
+      const wf      = uav?.tmmr?.waveform ?? '--';
+      // lq 는 위에서 이미 선언됨 (ticn?.link_quality)
+      const lossPct = uav?.ticn?.loss_pct ?? null;
+
+      // RSSI 바 (-120 dBm = 0%, -50 dBm = 100%)
+      if (rssi !== null) {
+        const rssiPct = Math.max(0, Math.min(100, ((rssi + 120) / 70) * 100));
+        const rssiBar = document.getElementById('tmmr-rssi-bar');
+        if (rssiBar) {
+          rssiBar.style.height = rssiPct + '%';
+          rssiBar.style.background = rssiPct > 60
+            ? 'linear-gradient(to top,#22c55e,#86efac)'
+            : rssiPct > 30
+            ? 'linear-gradient(to top,#f59e0b,#fcd34d)'
+            : 'linear-gradient(to top,#ef4444,#fca5a5)';
+        }
+        setText('tmmr-rssi-val', rssi + ' dBm');
+      }
+
+      // Waveform 배지
+      const wfBadge = document.getElementById('tmmr-wf-badge');
+      if (wfBadge) wfBadge.textContent = wf;
+      const chStatus = document.getElementById('tmmr-ch-status');
+      if (chStatus) {
+        chStatus.textContent = uavLost ? '통신 두절' : gcsRtOn ? '정상' : '재밍 의심';
+        chStatus.style.color = gcsRtOn ? '#22c55e' : '#ef4444';
+      }
+
+      // TICN LQ 바
+      if (lq !== null) {
+        const lqFill = document.getElementById('ticn-lq-fill');
+        if (lqFill) {
+          lqFill.style.width = lq + '%';
+          lqFill.style.background = lq > 60
+            ? 'linear-gradient(to right,#22c55e,#86efac)'
+            : lq > 30
+            ? 'linear-gradient(to right,#f59e0b,#fcd34d)'
+            : 'linear-gradient(to right,#ef4444,#fca5a5)';
+        }
+        setText('ticn-lq-val', lq + ' / 100');
+      }
+
+      // 패킷 손실 바
+      if (lossPct !== null) {
+        const lossFill = document.getElementById('ticn-loss-fill');
+        if (lossFill) lossFill.style.width = Math.min(100, lossPct) + '%';
+        setText('ticn-loss-val', lossPct + ' %');
+      }
+
+      // 토폴로지 노드 색상
+      const topoSet  = (id, ok) => { const el = document.getElementById(id); if (el) el.className = 'ticn-node '  + (ok ? 'node-ok'  : 'node-err'); };
+      const arrowSet = (id, ok) => { const el = document.getElementById(id); if (el) el.className = 'ticn-arrow ' + (ok ? 'arrow-ok' : 'arrow-err'); };
+      topoSet('topo-uav',    uavOn);     arrowSet('topo-a1', uavOn);
+      topoSet('topo-gcs',    uavOn);     arrowSet('topo-a2', gcsRtOn);
+      topoSet('topo-tmmr',   gcsRtOn);   arrowSet('topo-a3', gcsRtOn);
+      topoSet('topo-router', gcsRtOn);   arrowSet('topo-a4', sysOk && gcsRtOn);
+      topoSet('topo-c2',     sysOk && gcsRtOn);
+
+      // UTC 시간 문자열 → 로컬(KST) 시간 문자열 변환
+      function utcToLocal(timeStr) {
+        if (!timeStr || !timeStr.includes(':')) return timeStr;
+        const [h, m, s] = timeStr.split(':').map(Number);
+        const d = new Date();
+        d.setUTCHours(h, m, s, 0);
+        return d.toTimeString().slice(0, 8);
+      }
+
+      // Telemetry 로그 — MISSION_ITEM_REACHED 먼저 (dedup 없이 항상 표시)
+      events.filter(ev => ev.message && ev.message.startsWith('MISSION_ITEM_REACHED')).forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `wp|${localTime}|${ev.message}`;
+        if (seen1.has(key)) return;
+        seen1.add(key);
+        const commsBad = isCommsLost(platforms['UAV-001']);
+        addLog(`<tr class="row-uav" data-type="tel">
+          <td class="col-time">${localTime}</td>
+          <td><span class="log-type-tel">TEL</span></td>
+          <td class="col-src-uav">UAV-001</td>
+          <td class="col-data" style="color:#22c55e;font-weight:600">${ev.message}</td>
+          <td><span class="badge b-mav">MAVLink</span></td>
+          <td><span class="badge ${commsBad ? 'b-bad' : 'b-ok'}">${commsBad ? '통신불량' : '정상'}</span></td>
+        </tr>`);
+      });
+
+      // 일반 telemetry — source 기준 dedup (폴링 주기당 1건)
+      const latestBySource = {};
+      events.filter(ev => (ev.type === 'telemetry' || !ev.type)
+        && !(ev.message && ev.message.startsWith('MISSION_ITEM_REACHED'))).forEach(ev => {
+        latestBySource[ev.source] = ev;
+      });
+      Object.values(latestBySource).forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `${localTime}|${ev.source}`;
+        if (seen1.has(key)) return;
+        seen1.add(key);
+        const isUAV  = ev.source === 'UAV-001';
+        const p      = platforms[ev.source] || {};
+        const commsBad = isCommsLost(p);
+        const proto  = isUAV ? '<span class="badge b-mav">MAVLink</span>' : '<span class="badge b-ros">ROS2_JSON</span>';
+        const mtype  = isUAV ? 'GLOBAL_POSITION' : 'ODOM';
+        const detail = isUAV
+          ? `lat=${(p.lat||0).toFixed(4)}, alt=${p.alt??'-'}m, spd=${p.speed??'-'}m/s, fuel=${p.fuel??'-'}%`
+          : `lat=${(p.lat||0).toFixed(4)}, spd=${p.speed??'-'}m/s, batt=${p.battery??'-'}%`;
+        const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';
+        const rowCls = isUAV ? 'row-uav' : 'row-ugv';
+        addLog(`<tr class="${rowCls}" data-type="tel">
+          <td class="col-time">${localTime}</td>
+          <td><span class="log-type-tel">TEL</span></td>
+          <td class="${srcCls}">${ev.source}</td>
+          <td class="col-data" title="${mtype}: ${detail}">${mtype}: ${detail}</td>
+          <td>${proto}</td>
+          <td><span class="badge ${commsBad ? 'b-bad' : 'b-ok'}">${commsBad ? '통신불량' : '정상'}</span></td>
+        </tr>`);
+      });
+
+      // Command 로그 — 실제 전송된 명령만 (type === 'command')
+      events.filter(ev => ev.type === 'command').forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `cmd|${localTime}|${ev.source}|${ev.message}`;
+        if (seen1.has(key)) return;
+        seen1.add(key);
+        const target = ev.target || '';
+        const isUAV  = target === 'UAV-001' || target === '';
+        const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';
+        const rowCls = isUAV ? 'row-uav' : 'row-ugv';
+        const badge  = ev.status === 'ACK'
+          ? '<span class="badge b-ok">ACK</span>'
+          : '<span class="badge b-sent">SENT</span>';
+        addLog(`<tr class="${rowCls}" data-type="cmd">
+          <td class="col-time">${localTime}</td>
+          <td><span class="log-type-cmd">CMD</span></td>
+          <td class="${srcCls}">${target || '—'}</td>
+          <td class="col-data">${ev.message} — ${ev.source}</td>
+          <td></td>
+          <td>${badge}</td>
+        </tr>`);
+      });
+
+      // Agent 이벤트 렌더링 — ATK(빨간) / DEF(청록)
+      agentEvents.forEach(ev => {
+        const localTime = utcToLocal(ev.time);
+        const key = `agent|${localTime}|${ev.agent_type}|${ev.source}|${ev.message}|${ev.status}`;
+        if (seen1.has(key)) return;
+        seen1.add(key);
+        const isAtk   = ev.agent_type === 'ATK';
+        const rowCls  = isAtk ? 'row-atk' : 'row-def';
+        const typeLbl = isAtk
+          ? '<span class="log-type-atk">ATK</span>'
+          : '<span class="log-type-def">DEF</span>';
+        const srcBadge = isAtk
+          ? `<span class="badge b-atk">${ev.source}</span>`
+          : `<span class="badge b-def">${ev.source}</span>`;
+        let statusBadge = '';
+        if      (ev.status === 'ALERT')    statusBadge = '<span class="badge b-alert">ALERT</span>';
+        else if (ev.status === 'BLOCKED')  statusBadge = '<span class="badge b-blocked">BLOCKED</span>';
+        else if (ev.status === 'INJECTED') statusBadge = '<span class="badge b-atk">INJECT</span>';
+        else if (ev.status === 'FAILED')   statusBadge = '<span class="badge b-blocked">차단됨</span>';
+        addLog(`<tr class="${rowCls}" data-type="${isAtk ? 'atk' : 'def'}">
+          <td class="col-time">${localTime}</td>
+          <td>${typeLbl}</td>
+          <td>${srcBadge}</td>
+          <td class="col-data" title="${ev.detail || ev.message}">${ev.message}${ev.detail ? ' — ' + ev.detail : ''}</td>
+          <td></td>
+          <td>${statusBadge}</td>
+        </tr>`);
+      });
+    }
+
+    d1Poll();
+    setInterval(d1Poll, 1500);
+
+    // ── Mission State (C2 API 연동) ──────────────────────────────────────
+    const MSN_START = new Date();
+
+    function fmtDuration(ms) {
+      const s = Math.floor(ms / 1000);
+      const h = String(Math.floor(s / 3600)).padStart(2, '0');
+      const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+      const sec = String(s % 60).padStart(2, '0');
+      return `${h}:${m}:${sec}`;
+    }
+
+    // API에서 받은 mission_state로 패널 업데이트
+    function updateMissionState(ms) {
+      if (!ms) return;
+      const el = k => document.getElementById(k);
+      const phaseEl = el('msn-phase');
+      if (phaseEl) {
+        phaseEl.textContent = ms.phase || 'EN_ROUTE';
+        // 위험 상태 색상
+        phaseEl.style.color = ['LANDING','RTB','LOITER','COMMS_LOST'].includes(ms.phase)
+          ? '#ef4444' : ms.phase === 'PAUSED' ? '#f59e0b' : '';
+      }
+      if (el('msn-desc'))   el('msn-desc').textContent   = ms.desc   || '--';
+      if (el('msn-advice')) el('msn-advice').textContent = ms.advice  || '--';
+      if (el('msn-elapsed')) el('msn-elapsed').textContent = fmtDuration(Date.now() - MSN_START);
+    }
+
+    // 경과 시간 매초 갱신
+    setInterval(() => {
+      const el = document.getElementById('msn-elapsed');
+      if (el) el.textContent = fmtDuration(Date.now() - MSN_START);
+    }, 1000);
+
+    // 버튼 → POST /api/command → UAV MAVLink 전송
+    const msnCmdCooldown = {};
+    const CMD_LABELS = {
+      HOLD:    '경로 유지 (HOLD)',
+      MONITOR: '감시 강화 (MONITOR)',
+      PAUSE:   '임무 일시정지 (PAUSE)',
+      RESUME:  '임무 재개 (RESUME)',
+      RTB:     '귀환 (RTB)',
+    };
+    window.sendMsnCmd = async function(cmd) {
+      if (msnCmdCooldown[cmd]) return;
+      msnCmdCooldown[cmd] = true;
+      setTimeout(() => { delete msnCmdCooldown[cmd]; }, 3000);
+
+      const label = CMD_LABELS[cmd] || cmd;
+      appendCmd('UAV-001', label, 'SENT');
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd, target: 'UAV-001' }),
+        });
+        const data = await res.json();
+        updateCmdBadge('UAV-001', label, data.ok ? 'ACK' : 'ERR');
+      } catch {
+        updateCmdBadge('UAV-001', label, 'ERR');
+      }
+    };
+
+    // ── 최근 명령 로그 (실제 버튼 명령만 기록) ─────────────────────────
+    const cmdLog = document.getElementById('cmd-log');
+
+    function nowStr() { return new Date().toTimeString().slice(0, 8); }
+    function makeCmdItem(time, src, name, status) {
+      const badgeCls = status === 'ACK' ? 'cmd-badge-ack' : status === 'ERR' ? 'cmd-badge-err' : 'cmd-badge-sent';
+      const div = document.createElement('div');
+      div.className = 'cmd-item';
+      div.dataset.key = src + name;
+      div.innerHTML = `
+        <span class="cmd-time">${time}</span>
+        <div class="cmd-info">
+          <div class="cmd-name">${name}</div>
+          <div class="cmd-src">${src}</div>
+        </div>
+        <span class="cmd-badge ${badgeCls}">${status}</span>`;
+      return div;
+    }
+
+    // 휠 스크롤 속도 줄이기
+    cmdLog.addEventListener('wheel', e => {
+      e.preventDefault();
+      cmdLog.scrollTop += e.deltaY * 0.3;
+    }, { passive: false });
+
+    function appendCmd(src, name, status) {
+      if (!cmdLog) return;
+      const item = makeCmdItem(nowStr(), src, name, status);
+      cmdLog.appendChild(item);
+      while (cmdLog.children.length > 30) cmdLog.firstChild.remove();
+      cmdLog.scrollTop = cmdLog.scrollHeight;
+    }
+    function updateCmdBadge(src, name, status) {
+      const key = src + name;
+      const el = cmdLog.querySelector(`[data-key="${key}"]`);
+      if (!el) return appendCmd(src, name, status);
+      const badge = el.querySelector('.cmd-badge');
+      if (!badge) return;
+      badge.className = 'cmd-badge ' + (status === 'ACK' ? 'cmd-badge-ack' : 'cmd-badge-sent');
+      badge.textContent = status;
+    }
+
+  })();
+
+  // ── 대시보드 전환 ─────────────────────────────────────────────────────
+  let d2Initialized = false;
+
+  function switchDashboard(n) {
+    document.querySelectorAll('.nav-item').forEach((el, idx) => {
+      el.classList.toggle('active', idx + 1 === n);
+    });
+    document.getElementById('dash1').style.display = n === 1 ? '' : 'none';
+    document.getElementById('dash2').style.display = n === 2 ? '' : 'none';
+    document.getElementById('dash3').style.display = n === 3 ? '' : 'none';
+    if (n === 2 && !d2Initialized) initDash2();
+  }
+
+  // ── GCS 수신 ─────────────────────────────────────────────────────────
+  async function gcsRefreshStatus() {
+    try {
+      const d = await (await fetch('/api/live')).json();
+      const pm = {};
+      (d.platforms || []).forEach(p => pm[p.platform_id] = p);
+
+      const u = pm['UAV-001'] || {};
+      document.getElementById('g-uav-alt').textContent  = u.alt   != null ? `${u.alt} m`   : '-- m';
+      document.getElementById('g-uav-spd').textContent  = u.speed != null ? `${u.speed} kt` : '-- kt';
+      document.getElementById('g-uav-fuel').textContent = u.fuel  != null ? `${u.fuel} %`   : '-- %';
+      document.getElementById('g-uav-pos').textContent  = u.lat   != null ? `${u.lat.toFixed(4)}, ${u.lon.toFixed(4)}` : '--';
+      document.getElementById('g-uav-st').textContent   = u.status || '--';
+
+      const g = pm['UGV-001'] || {};
+      document.getElementById('g-ugv-spd').textContent = g.speed   != null ? `${g.speed} m/s` : '-- m/s';
+      document.getElementById('g-ugv-bat').textContent = g.battery != null ? `${g.battery} %`  : '-- %';
+      document.getElementById('g-ugv-sen').textContent = g.sensor_status || '--';
+      document.getElementById('g-ugv-pos').textContent = g.lat != null ? `${g.lat.toFixed(4)}, ${g.lon.toFixed(4)}` : '--';
+      document.getElementById('g-ugv-st').textContent  = g.status || '--';
+
+      document.getElementById('gcs-dot').style.background = '#3fb950';
+      document.getElementById('gcs-upd').textContent = new Date().toTimeString().slice(0, 8);
+    } catch {
+      document.getElementById('gcs-dot').style.background = '#f85149';
+    }
+  }
+  gcsRefreshStatus();
+  setInterval(gcsRefreshStatus, 2000);
+
+  // ── 대시보드2 초기화 ──────────────────────────────────────────────────
+  function initDash2() {
+    d2Initialized = true;
+
+    const map2 = L.map('leaflet-map2', { zoomControl: false, attributionControl: false }).setView([37.5685, 126.9780], 14);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }).addTo(map2);
+    L.polyline([[37.5748,126.9752],[37.5752,126.9762],[37.5757,126.9771],[37.5762,126.9781],[37.5767,126.9786],[37.5761,126.9793],[37.5754,126.9788],[37.5748,126.9778],[37.5744,126.9764],[37.5748,126.9752]], { color:'#6fb9ff', weight:2, dashArray:'5,4' }).addTo(map2);
+    L.polyline([[37.5660,126.9755],[37.5663,126.9762],[37.5666,126.9768],[37.5664,126.9774],[37.5660,126.9770],[37.5657,126.9763],[37.5660,126.9755]], { color:'#22c55e', weight:2, dashArray:'5,4' }).addTo(map2);
+    L.circleMarker([37.5757,126.9771], { radius:5, color:'#6fb9ff', fillColor:'#6fb9ff', fillOpacity:1 }).addTo(map2).bindTooltip('UAV-001',{permanent:true,direction:'right',offset:[6,0],className:'wp-tooltip'});
+    L.circleMarker([37.5663,126.9762], { radius:5, color:'#22c55e', fillColor:'#22c55e', fillOpacity:1 }).addTo(map2).bindTooltip('UGV-001',{permanent:true,direction:'right',offset:[6,0],className:'wp-tooltip'});
+
+    const canvas = document.getElementById('d2-chart');
+    const ctx    = canvas.getContext('2d');
+    const N = 30;
+    const telemData = Array.from({length:N}, (_,i) => 97 + Math.sin(i*0.4)*1.5);
+    const ackData   = Array.from({length:N}, (_,i) => 95 + Math.cos(i*0.35)*2);
+    const lossData  = Array.from({length:N}, (_,i) => 2.1 + Math.sin(i*0.6)*0.5);
+
+    function drawChart() {
+      const W = canvas.clientWidth, H = 80;
+      canvas.width = W; canvas.height = H;
+      ctx.clearRect(0, 0, W, H);
+      ctx.strokeStyle = '#f0f2f5'; ctx.lineWidth = 1;
+      [25,50,75,100].forEach(y => {
+        const py = H - (y/100)*H;
+        ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(W,py); ctx.stroke();
+        ctx.fillStyle='#c0c8d8'; ctx.font='8px sans-serif'; ctx.fillText(y+'%',2,py-2);
+      });
+      [[telemData,'#22c55e'],[ackData,'#6fb9ff'],[lossData.map(v=>v*10),'#f87171']].forEach(([data,color]) => {
+        ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=1.5;
+        data.forEach((v,i) => {
+          const x = (i/(N-1))*W, y = H - (v/100)*H;
+          i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+        });
+        ctx.stroke();
+      });
+    }
+    drawChart();
+
+    const tb = document.getElementById('d2-telem-body');
+    const cb = document.getElementById('d2-cmd-body');
+    const ab = document.getElementById('d2-agent-body');
+    const seenKeys = new Set();
+    const lastSeqs = {};
+    let agentTick  = 0;
+
+    function addRow(tbody, html) {
+      tbody.insertAdjacentHTML('afterbegin', html);
+      if (tbody.children.length > 80) tbody.lastElementChild.remove();
+    }
+
+    async function d2Poll() {
+      let data;
+      try { data = await (await fetch('/api/live')).json(); } catch { return; }
+
+      const events    = data.events    || [];
+      const platforms = {};
+      (data.platforms || []).forEach(p => { platforms[p.platform_id] = p; });
+
+      events.forEach(ev => {
+        const key = `${ev.time}|${ev.source}|${ev.message}`;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        const isUAV   = ev.source === 'UAV-001';
+        const p       = platforms[ev.source] || {};
+        const seqM    = ev.message.match(/seq=(\d+)/);
+        const seq     = seqM ? seqM[1] : '-';
+        const msgType = isUAV ? 'GLOBAL_POSITION' : 'ODOM';
+        const proto   = isUAV ? '<span class="proto-mav">MAVLink/UDP</span>' : '<span class="proto-ros">ROS2_JSON</span>';
+        const detail  = isUAV
+          ? `seq=${seq}, lat=${(p.lat||0).toFixed(4)}, alt=${p.alt??'-'}m, spd=${p.speed??'-'}kt, fuel=${p.fuel??'-'}%`
+          : `seq=${seq}, lat=${(p.lat||0).toFixed(4)}, spd=${p.speed??'-'}m/s, batt=${p.battery??'-'}%, sensor=${p.sensor_status??'-'}`;
+        const srcCls = isUAV ? 'col-src-uav' : 'col-src-ugv';
+        const rowCls = isUAV ? 'row-uav' : 'row-ugv';
+        addRow(tb, `<tr class="${rowCls}">
+          <td class="col-time">${ev.time}</td>
+          <td class="${srcCls}">${ev.source}</td>
+          <td class="col-type">${msgType}</td>
+          <td>${proto}</td>
+          <td class="col-data" title="${detail}">${detail}</td>
+          <td><span class="st-ok">정상</span></td>
+        </tr>`);
+      });
+
+
+      agentTick++;
+      if (agentTick % 4 === 0) {
+        const now = new Date().toTimeString().slice(0, 8);
+        const uav = platforms['UAV-001'];
+        const ugv = platforms['UGV-001'];
+        if (uav) {
+          const [jcls, judge, action] =
+            uav.fuel < 30  ? ['jdg-danger',  '위험 (연료 부족)',      `Command Send (RTB, fuel=${uav.fuel}%)`] :
+            uav.fuel < 60  ? ['jdg-caution', '주의 (연료 감소 추세)', 'No Action (지속 모니터링)'] :
+                             ['jdg-ok',      '정상',                  'No Action'];
+          addRow(ab, `<tr class="row-uav">
+            <td class="col-time">${now}</td>
+            <td class="col-src-uav">Control Agent</td>
+            <td class="col-data">UAV-001 fuel=${uav.fuel}%, alt=${uav.alt}m, spd=${uav.speed}kt</td>
+            <td><span class="${jcls}">${judge}</span></td>
+            <td class="col-type">${action}</td>
+          </tr>`);
+        }
+        if (ugv) {
+          const [jcls, judge, action] =
+            ugv.battery < 20 ? ['jdg-danger',  '위험 (배터리 부족)',  `Command Send (복귀, batt=${ugv.battery}%)`] :
+            ugv.battery < 50 ? ['jdg-caution', '주의 (배터리 감소)', 'No Action (지속 모니터링)'] :
+                               ['jdg-ok',      '정상',               'No Action'];
+          addRow(ab, `<tr class="row-ugv">
+            <td class="col-time">${now}</td>
+            <td class="col-src-ugv">Defense Agent</td>
+            <td class="col-data">UGV-001 batt=${ugv.battery}%, spd=${ugv.speed}m/s, sensor=${ugv.sensor_status}</td>
+            <td><span class="${jcls}">${judge}</span></td>
+            <td class="col-type">${action}</td>
+          </tr>`);
+        }
+      }
+
+      const evTotal = seenKeys.size;
+      document.getElementById('d2-telem-rate').textContent = Math.min(99.9, 95 + (evTotal % 11) * 0.45).toFixed(1) + '%';
+      document.getElementById('d2-ack-rate').textContent   = Math.min(99.9, 94 + (evTotal % 8)  * 0.6 ).toFixed(1) + '%';
+      telemData.shift(); telemData.push(96 + (evTotal % 5) * 0.8 + (Math.random()-0.5)*1.5);
+      ackData.shift();   ackData.push(95   + (evTotal % 6) * 0.7 + (Math.random()-0.5)*2);
+      lossData.shift();  lossData.push(1.5 + (Math.random()-0.5)*1.2);
+      drawChart();
+    }
+
+    d2Poll();
+    setInterval(d2Poll, 1500);
+  }
+</script>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UAV/UGV 기본 통신 구조 대시보드</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"/>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  {% include "_styles.html" %}
+</head>
+<body>
+
+<!-- 사이드바 -->
+<nav class="sidebar">
+  <div class="sidebar-logo">C2</div>
+  <div class="nav-item active" onclick="switchDashboard(1)"><span class="icon">⊞</span>대시보드</div>
+  <div class="nav-item" onclick="switchDashboard(2)"><span class="icon">◈</span>대시보드2</div>
+  <div class="nav-item" onclick="switchDashboard(3)"><span class="icon">⌖</span>GCS</div>
+</nav>
+
+<!-- 메인 -->
+<div class="main">
+
+  <!-- 헤더 -->
+  <header class="header">
+    <div class="header-title">
+      <h1>UAV / UGV 통신 대시보드</h1>
+    </div>
+    <div class="header-right">
+      <!-- 상태 칩 -->
+      <div class="hdr-divider"></div>
+      <div class="hdr-chip"><span class="dot" id="dot-uav"></span><span class="chip-lbl">UAV</span><span class="chip-val" id="hdr-uav">--/1</span></div>
+      <div class="hdr-chip"><span class="dot" id="dot-ugv"></span><span class="chip-lbl">UGV</span><span class="chip-val" id="hdr-ugv">--/1</span></div>
+      <div class="hdr-chip"><span class="dot" id="dot-gcs"></span><span class="chip-lbl">GCS</span><span class="chip-val" id="hdr-gcs">--</span></div>
+      <div class="hdr-chip"><span class="dot" id="dot-c2"></span><span class="chip-lbl">C2</span><span class="chip-val" id="hdr-c2">--</span></div>
+      <div class="hdr-chip"><span class="dot" id="dot-latency"></span><span class="chip-lbl">지연</span><span class="chip-val" id="hdr-latency">-- ms</span></div>
+      <div class="hdr-chip"><span class="dot" id="dot-loss"></span><span class="chip-lbl">손실</span><span class="chip-val" id="hdr-loss">-- %</span></div>
+      <div class="hdr-divider"></div>
+      <div class="hdr-badge">
+        <span class="dot g"></span>
+        <div><div class="lbl">시스템 상태</div><div class="val" style="color:#22c55e">모든 시스템 정상</div></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- 대시보드1 -->
+  <div class="content" id="dash1">
+    {% include "dash1/_map.html" %}
+    {% include "dash1/_logs.html" %}
+  </div>
+
+  <!-- 대시보드2 -->
+  <div class="content" id="dash2" style="display:none;">
+    {% include "dash2/_filter.html" %}
+    {% include "dash2/_logs.html" %}
+    {% include "dash2/_agent.html" %}
+  </div>
+
+</div>
+
+<!-- GCS -->
+{% include "gcs/_panel.html" %}
+
+{% include "_scripts.html" %}
+</body>
+</html>
