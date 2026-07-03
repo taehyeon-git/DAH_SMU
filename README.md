@@ -1,4 +1,4 @@
-# DAH 2026 UAV/UGV 위성 네트워크 기반 클라우드 가상 전장  
+# DAH 2026 UAV/UGV 위성 네트워크 기반 클라우드 가상 전장
 
 ---
 
@@ -6,14 +6,9 @@
 
 DAH - **UAV/UGV 전술 무인체계 통신 구조 시뮬레이션**입니다.
 
-LIG Defense&Aerospace의 항공전자·드론, 전자전, 무인화·미래전 분야와  
-한화시스템의 C5I, TICN, 군 위성통신체계-II, 전술데이터링크 개념을 참고합니다.
-
-현재 대시보드는 C2, Mission Control, UAV, UGV, EW UAV, TICN/SATCOM 링크 상태를 움직이는 전장 시뮬레이션 형태로 시각화합니다.
+현재 대시보드는 UAV/UGV, GCS/Mission Control, Tactical Router, TICN-like Network 간의 Telemetry/Command 흐름과 링크 상태를 전장 시뮬레이션 형태로 시각화하며, AI 공격·방어 이벤트에 따른 상태 변화를 실시간으로 표시합니다.
 
 ## 아키텍처
-
-Docker 기반 UAV/UGV 도메인 가상 환경에서 무인체계의 Telemetry/Command 흐름을 구성하고, 그 위에서 AI Attack Agent와 AI Defense Agent의 자동 공격·방어 성능을 검증하는 아키텍처.
 
 ```text
 ┌──────────────────────────── UAV / UGV Asset Layer ─────────────────────────────┐
@@ -123,101 +118,48 @@ Docker 기반 UAV/UGV 도메인 가상 환경에서 무인체계의 Telemetry/Co
 
 ## 구현 범위
 
-본 프로젝트는 실제 TICN, TMMR, MAVLink, ROS2 네트워크를 완전 구현하는 것이 아니라, **Docker 기반 UAV/UGV 도메인 가상 환경에서 Telemetry/Command 흐름과 AI 공격·방어 구조를 검증하기 위한 통신 시뮬레이션**이다.
+## 구현 범위
 
-UAV는 Autopilot/Flight Controller와 Companion Computer 구조를 모사한다. Autopilot/FC는 비행 제어와 Mission Command 실행을 담당하고, Companion Computer는 MAVLink-like Telemetry/Command, Payload Status, GCS 통신을 담당한다.
+본 프로젝트는 실제 군 통신망이나 장비를 구현하는 것이 아니라, Docker 기반 폐쇄형 UAV/UGV 가상 환경에서 Telemetry/Command 흐름과 AI 공격·방어 구조를 검증하는 통신 시뮬레이션이다.
 
-UGV는 Vehicle Controller와 Onboard/Mission Computer 구조를 모사하며, ROS2/MQTT-like Telemetry와 Sensor Status를 생성한다.
+UAV/UGV는 상태 생성, 임무 수행, Telemetry 전송, Command 수신 기능을 모사하며, GCS/Mission Control은 이를 수신·해석해 Dashboard, LogDB, AI Defense Agent로 분기한다.
 
-Telemetry는 실제 MAVLink/ROS2/MQTT 패킷이 아니라, 해당 메시지 구조를 참고한 JSON 기반 데이터로 생성된다. UAV/UGV의 Telemetry는 C2 Data Link를 통해 GCS / Mission Control Server로 전달된다.
+AI Attack Agent는 통제된 공격 이벤트를 생성하고, AI Defense Agent는 Telemetry, Command Flow, Network Event, Mission State를 분석해 이상징후를 탐지한다.
 
-GCS는 Telemetry를 수신·해석하고 Dashboard, Telemetry Collector/LogDB, AI Defense Agent로 데이터를 분기한다. 또한 위치, 상태, 임무, 표적, 영상 메타데이터를 전술망 연동 메시지로 변환하여 Virtual Tactical Router/TIPS로 전달한다.
-
-Command는 GCS 운용자 또는 Upper C2/BMS Simulator에서 생성된다. Upper C2/BMS의 명령은 TICN-like Network, TMMR, Virtual Tactical Router/TIPS를 거쳐 GCS로 전달되고, GCS에서 UAV/UGV가 실행 가능한 Command로 변환된 뒤 C2 Data Link를 통해 하달된다.
-
-AI Attack Agent는 폐쇄형 Docker 가상 네트워크 내부에서 Telemetry 위조, Command 변조, GPS 이상 좌표, 통신 지연·손실·차단·변조 이벤트를 생성한다. AI Defense Agent는 실시간 Telemetry, Command Flow, Network Event, Mission State를 분석해 이상징후를 탐지하고 대응 정책을 결정한다.
-
-## 시스템 구성 요소
-
-- **UAV Simulator**
-  - Autopilot/FC: 비행 제어, Mission Command 실행
-  - Companion Computer: MAVLink-like Telemetry/Command, Payload Status, GCS 통신
-
-- **UGV Simulator**
-  - Vehicle Controller: 주행 제어, Command 실행
-  - Onboard/Mission Computer: ROS2/MQTT-like Telemetry, Sensor Status, GCS 통신
-
-- **C2 Data Link**
-  - UAV/UGV와 GCS 사이의 Telemetry/Command 통신 구간
-  - Telemetry/Report: UAV/UGV → GCS
-  - Command/Tasking: GCS → UAV/UGV
-
-- **GCS / Ground Gateway / Mission Control Server**
-  - UAV/UGV Telemetry 수신·해석
-  - 임무 상태 판단 및 Command 생성
-  - Upper C2/BMS 명령을 UAV/UGV용 Command로 변환
-  - 전술망 연동 메시지 생성
-
-- **Dashboard**
-  - UAV/UGV 상태, 지도, 임무, 경고, 공격/방어 결과 시각화
-
-- **Telemetry Collector / LogDB**
-  - Telemetry Log, Command Log, Network Log, Attack Log 저장
-
-- **AI Attack Agent**
-  - 폐쇄형 Docker 가상망 내부에서 통제된 공격 이벤트 생성
-  - Telemetry 위조, Command 변조, GPS 이상 좌표, 통신 지연·손실·차단·변조 이벤트 수행
-
-- **AI Defense Agent**
-  - 실시간 Telemetry, Command Flow, Network Event, Mission State 분석
-  - Command 무결성 검증, 이상징후 탐지, 공격 유형 분류, 대응 정책 결정
-
-- **Virtual Tactical Router / TIPS**
-  - Docker Network 기반 가상 전술 라우터
-  - GCS와 전술망 사이의 IP 패킷 라우팅 및 전술망 데이터 중계
-  - 지연, 손실, 차단, 변조 이벤트 적용 지점
-  - MAVLink/ROS2 직접 해석 없음
-
-- **TMMR / 전투무선체계(CNRS-series)**
-  - Tactical Router/TIPS와 TICN-like Network 사이의 전술 무선 접속 구간 모사
-
-- **TICN-like Tactical Network**
-  - 전술정보통신망 데이터 전달 흐름 모사
-  - C4ISR 지휘통제망 연동 흐름 표현
-
-- **Upper C2 / BMS Simulator**
-  - 작전 상황 공유, 표적/좌표 공유, 감시 구역 지정, 임무 변경 지시
-  - UAV/UGV에 직접 명령하지 않고 GCS를 통해 Command로 변환
+본 시나리오의 핵심은 Heartbeat 이상, Link Quality 저하, Telemetry Gap 등 통신 상태 이상을 통해 UAV/UGV의 Fail-safe 전환 가능성을 검증하는 것이다.
 
 ## 네트워크 구성
 
-### 내부 UDP 포트
+본 프로젝트는 Docker 내부 네트워크에서 UAV/UGV, GCS, Tactical Router, Collector, Dashboard 간 Telemetry/Command 흐름을 구성한다.  
+외부에서는 Dashboard와 주요 API만 접근하도록 구성한다.
 
-| 구간 | 포트 | 프로토콜 | 의미 |
-| --- | ---: | --- | --- |
-| UAV → Companion | `14550` | UDP / MAVLink-like | UAV Telemetry 전송 |
-| Companion → UAV | `14551` | UDP / MAVLink-like | UAV Command 전달 |
-| GCS → Companion | `14552` | UDP / JSON | Companion Command 수신 |
-| Companion → GCS | `14555` | UDP / JSON | MAVLink-like Telemetry를 JSON으로 변환 후 GCS 전달 |
-| GCS → Tactical Router | `14560` | UDP / JSON | GCS가 변환한 전술망 연동 데이터 전달 |
-| Router → Upper C2/BMS | `14545` | UDP / JSON | 전술 상황 데이터 전달 |
-| Upper C2/BMS → Router | `14546` | UDP / JSON | 상위 C2 작전 명령 하달 |
-| Router → GCS | `14562` | UDP / JSON | Upper C2 명령을 GCS로 전달 |
-| UGV → Router | `14660` | UDP / JSON | UGV Telemetry 전달 |
-| Router → UGV | `14661` | UDP / JSON | UGV Command 전달 |
-| Attack/Jam Event → Router | `14590` | UDP / JSON | Jamming/Event 입력 |
-| GCS → Collector | `14541` | UDP / JSON | Telemetry / Command / Attack Log 수집 |
-| GCS/Router → Dashboard | `14571` | UDP / JSON | Dashboard Telemetry 수신 |
+### 내부 통신 포트
 
-### 외부 접속 포트
+| 구간 | 포트 | 프로토콜 | 역할 |
+|---|---:|---|---|
+| UAV → Companion | `14550` | UDP / MAVLink | UAV Telemetry 전송 |
+| Companion → UAV | `14551` | UDP / MAVLink | UAV Command 전달 |
+| GCS → Companion | `14552` | UDP / JSON | GCS Command 전달 |
+| Companion → GCS | `14555` | UDP / JSON | Telemetry JSON 변환 후 전달 |
+| GCS → Router | `14560` | UDP / JSON | 전술망 연동 데이터 전달 |
+| Router → GCS | `14562` | UDP / JSON | 상위 C2 명령 전달 |
+| Router ↔ Upper C2/BMS | `14545 / 14546` | UDP / JSON | 전술 상황 데이터 및 작전 명령 송수신 |
+| UGV ↔ Router | `14660 / 14661` | UDP / JSON | UGV Telemetry 및 Command 송수신 |
+| Attack Event → Router | `14590` | UDP / JSON | 통제된 공격 이벤트 입력 |
+| GCS → Collector | `14541` | UDP / JSON | Telemetry / Command / Event Log 저장 |
+| GCS/Router → Dashboard | `14571` | UDP / JSON | 실시간 상태 시각화 데이터 전달 |
 
-| 서비스 | URL | 프로토콜 | 의미 |
-| --- | --- | --- | --- |
-| API Gateway / Dashboard | `http://localhost:9000` | HTTP/TCP | 메인 Dashboard |
-| GCS API | `http://localhost:9000/gcs/` | HTTP/TCP | GCS 상태/API |
-| Upper C2/BMS API | `http://localhost:9000/c2/` | HTTP/TCP | Upper C2/BMS 상태/API |
-| Tactical Router API | `http://localhost:9000/router/` | HTTP/TCP | Tactical Router 상태/API |
-| Tactical Router Direct API | `http://localhost:8084` | HTTP/TCP | Router 상태 직접 확인 |
+### 외부 접속 정보
+
+| 서비스 | URL | 역할 |
+|---|---|---|
+| Dashboard / API Gateway | `http://localhost:9000` | 메인 대시보드 |
+| GCS API | `http://localhost:9000/gcs/` | GCS 상태 및 명령 API |
+| Upper C2/BMS API | `http://localhost:9000/c2/` | 상위 C2/BMS 상태 API |
+| Tactical Router API | `http://localhost:9000/router/` | 가상 전술 라우터 상태 API |
+| Router Direct API | `http://localhost:8084` | Router 직접 상태 확인 |
+
+---
 
 ## 통신 구현 방식
 
@@ -232,7 +174,7 @@ UAV(`uav/sitl_runner.py`)는 실제 **ArduPilot SITL** 바이너리를 구동하
 ┌─────────────────────────────────────────────────────────────────┐
 │ dah-uav  172.20.0.10                                            │
 │                                                                 │
-│  ArduPlane SITL (TCP:5760 내부)                                  │
+│  ArduPlane SITL (TCP:5760 내부)                                   │
 │       ↕ pymavlink                                               │
 │  sitl_runner.py                                                 │
 │  - HEARTBEAT (SYS_ID=1, MAV_TYPE_FIXED_WING) 1Hz               │
