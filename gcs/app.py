@@ -25,6 +25,8 @@ COLLECTOR_HOST = os.getenv("COLLECTOR_HOST", "telemetry-collector")
 COLLECTOR_PORT = int(os.getenv("COLLECTOR_PORT", "14541"))
 ROUTER_HOST    = os.getenv("ROUTER_HOST",    "tactical-router")
 ROUTER_PORT    = int(os.getenv("ROUTER_PORT",    "14560"))  # GCS → Router 전술 릴레이
+RECON_TAP_HOST = os.getenv("RECON_TAP_HOST", "")
+RECON_TAP_PORT = int(os.getenv("RECON_TAP_PORT", "14572"))
 
 CC_HOST        = os.getenv("CC_HOST",        "dah-companion")
 CC_CMD_PORT    = int(os.getenv("CC_CMD_PORT",    "14552"))  # GCS → CC 직접 명령
@@ -83,11 +85,14 @@ def add_event(source: str, message: str, level: str = "info",
 def fanout(payload: dict):
     """Dashboard · Collector · Tactical Router 순서로 분배"""
     data = json.dumps(payload).encode()
-    for name, host, port in [
+    targets = [
         ("Dashboard",        DASHBOARD_HOST, DASHBOARD_PORT),
         ("Collector",        COLLECTOR_HOST, COLLECTOR_PORT),
         ("Tactical Router",  ROUTER_HOST,    ROUTER_PORT),
-    ]:
+    ]
+    if RECON_TAP_HOST:
+        targets.append(("Recon Tap", RECON_TAP_HOST, RECON_TAP_PORT))
+    for name, host, port in targets:
         try:
             _out_sock.sendto(data, (host, port))
         except Exception as e:

@@ -72,7 +72,10 @@ services:
       COLLECTOR_HOST: telemetry-collector
       COLLECTOR_PORT: 14541               # GCS → Collector fan-out
       ROUTER_HOST: tactical-router
-      ROUTER_PORT: 14560                  # GCS → Router 전술 릴레이
+      ROUTER_PORT: 14560                  # GCS -> Router tactical relay
+      RECON_TAP_HOST: dah-recon
+      RECON_TAP_PORT: 14572
+
       CC_HOST: dah-companion
       CC_CMD_PORT: 14552                  # GCS → CC 직접 명령
     depends_on:
@@ -165,7 +168,7 @@ services:
       - --listen-host
       - "0.0.0.0"
       - --listen-port
-      - "14550"
+      - "14572"
       - --duration-s
       - "120"
       - --revalidate-s

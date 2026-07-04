@@ -1,18 +1,3 @@
-# -*- coding: utf-8 -*-
-"""Passive MAVLink Recon — Low-Privilege Sentinel (DAH_SMU edition).
-
-6단계 파이프라인:
-  Phase 0: Dashboard API 사전 정찰  (GET /api/live + /api/failsafe)
-  Phase 1: UDP 14550 수동 MAVLink 청취  (120s, dah-net 브로드캐스트)
-  Phase 2: 6-팩터 신뢰도 채점
-  Phase 3: LOW 자산 단기 재검증  (20s)
-  Phase 4: DAH_SMU 후속 에이전트 매핑
-             dah-executor / dah-spoofer / dah-jammer / dah-inducer
-  Phase 5: JSON 저장  (intel.json + intel_handoff.json)
-
-보안 제약: raw socket 없음, 패킷 주입 없음, 실제 군 장비 미연결.
-Phase 0에서 HTTP 요청 1회 발생 — 이후는 완전 수동.
-"""
 from __future__ import annotations
 
 import argparse
@@ -26,167 +11,62 @@ from typing import Any
 
 from mavlink_parser import ParsedMavlinkFrame, parse_datagram
 
-# ── 수신 설정 ──────────────────────────────────────────────────────────────
-LISTEN_PORT = 14550   # UAV(172.20.0.10) → dah-net 브로드캐스트 포트
-LISTEN_HOST = "0.0.0.0"
 
-# ── Dashboard / ops_net 통신 ───────────────────────────────────────────────
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 14572
+
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "dah-dashboard")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "14571"))
-DASHBOARD_URL  = f"http://{DASHBOARD_HOST}:8080"
+DASHBOARD_URL = f"http://{DASHBOARD_HOST}:8080"
 
-_evt_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+UAV_PLATFORM_ID = "UAV-001"
+UAV_SYS_ID = 1
+CONF_HIGH = 0.80
+CONF_MEDIUM = 0.50
 
-
-def _send_event(message: str, level: str = "info", detail: str = "", status: str = "") -> None:
-    evt = {
-        "platform_type": "AGENT",
-        "agent_type":    "ATK",
-        "platform_id":   "ATK-RECON",
-        "source":        "PASSIVE-MAVLINK-RECON",
-        "message":       message,
-        "detail":        detail,
-        "level":         level,
-        "status":        status,
-        "time":          time.strftime("%H:%M:%S"),
-    }
-    try:
-        _evt_sock.sendto(json.dumps(evt).encode(), (DASHBOARD_HOST, DASHBOARD_PORT))
-    except Exception:
-        pass
-
-
-# ── DAH_SMU 작전 상수 ─────────────────────────────────────────────────────
-# UAV-001 (송골매) 운용 제원
-UAV_PLATFORM_ID  = "UAV-001"
-UAV_SYS_ID       = 1
-UAV_HOST         = "172.20.0.10"
-UAV_CMD_PORT     = 14551
-UAV_CRUISE_ALT_M = 3500.0        # 순항 고도 (m)
-UAV_CRUISE_SPD_MS= 166.7         # 600 km/h → m/s
-
-# 경기 북부 정찰 작전구역 경계 (WAYPOINTS 외각)
 OA_LAT_MIN = 37.850
 OA_LAT_MAX = 37.960
 OA_LON_MIN = 126.790
 OA_LON_MAX = 126.920
 
-# 후속 에이전트 (dah-net / ops_net 주소)
-AGENT_EXECUTOR_HOST = "172.20.0.50"   # dah-executor
-AGENT_JAMMER_HOST   = "dah-tactical-router"
-AGENT_JAM_PORT      = 14590
-
-# 신뢰도 임계값
-CONF_HIGH   = 0.80
-CONF_MEDIUM = 0.50
-
-# ── MAVLink 상수 ──────────────────────────────────────────────────────────
 MAV_TYPE = {
-    0: "GENERIC", 2: "QUADROTOR", 10: "GROUND_ROVER",
-    14: "ONBOARD_CONTROLLER", 27: "ADSB",
+    0: "GENERIC",
+    1: "FIXED_WING",
+    2: "QUADROTOR",
+    10: "GROUND_ROVER",
+    14: "ONBOARD_CONTROLLER",
 }
 MAV_STATE = {
-    0: "UNINIT", 1: "BOOT", 2: "CALIBRATING", 3: "STANDBY",
-    4: "ACTIVE", 5: "CRITICAL", 6: "EMERGENCY", 7: "POWEROFF",
-}
-COMMAND_ACK_RESULT = {
-    0: "ACCEPTED", 1: "TEMP_REJECTED", 2: "DENIED",
-    3: "UNSUPPORTED", 4: "FAILED", 5: "IN_PROGRESS",
-}
-MISSION_ACK_TYPE = {
-    0: "ACCEPTED", 1: "ERROR", 2: "UNSUPPORTED_FRAME",
-    3: "UNSUPPORTED", 4: "NO_SPACE", 5: "INVALID",
-    6: "INVALID_PARAM1", 13: "OPERATION_CANCELLED",
-}
-COMMAND_NAMES = {
-    16:  "MAV_CMD_NAV_WAYPOINT",
-    17:  "MAV_CMD_NAV_LOITER_UNLIM",
-    20:  "MAV_CMD_NAV_RETURN_TO_LAUNCH",
-    21:  "MAV_CMD_NAV_LAND",
-    176: "MAV_CMD_DO_SET_MODE",
-    193: "MAV_CMD_DO_PAUSE_CONTINUE",
+    0: "UNINIT",
+    1: "BOOT",
+    2: "CALIBRATING",
+    3: "STANDBY",
+    4: "ACTIVE",
+    5: "CRITICAL",
+    6: "EMERGENCY",
+    7: "POWEROFF",
 }
 
+_evt_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-# ── Phase 0: Dashboard API 사전 정찰 ─────────────────────────────────────
 
-def phase0_api_recon() -> dict[str, Any]:
-    """Dashboard /api/live + /api/failsafe 를 통해 현재 운용 상태 및 취약 정책값 수집.
-    HTTP 요청이 발생하므로 GCS 감사로그에 흔적이 남을 수 있음(대시보드 → GCS 경유).
-    """
-    _send_event("Phase 0: API 사전 정찰 시작", detail=DASHBOARD_URL)
-
-    live, policy = {}, {}
-    http_requests = 0
-    try:
-        with urllib.request.urlopen(f"{DASHBOARD_URL}/api/live", timeout=3) as r:
-            live = json.loads(r.read())
-        http_requests += 1
-    except Exception as e:
-        print(f"[RECON-P0] /api/live 실패: {e}", flush=True)
-
-    try:
-        with urllib.request.urlopen(f"{DASHBOARD_URL}/api/failsafe", timeout=3) as r:
-            policy = json.loads(r.read())
-        http_requests += 1
-    except Exception as e:
-        print(f"[RECON-P0] /api/failsafe 실패: {e}", flush=True)
-
-    # UAV-001 상태 파싱
-    pmap = {p.get("platform_id"): p for p in live.get("platforms", [])}
-    uav  = pmap.get(UAV_PLATFORM_ID, {})
-    ticn = uav.get("ticn", {})
-    mission_state = live.get("mission_state", {})
-
-    baseline: dict[str, Any] = {
-        "http_requests":       http_requests,
-        "api_available":       bool(live),
-        # UAV 현재 상태
-        "uav_lat":             uav.get("lat"),
-        "uav_lon":             uav.get("lon"),
-        "uav_alt":             uav.get("alt"),
-        "uav_mode":            uav.get("mode"),
-        "uav_fuel":            uav.get("fuel", uav.get("battery")),
-        "uav_speed":           uav.get("speed"),
-        "uav_status":          uav.get("status"),
-        "mission_phase":       mission_state.get("phase"),
-        "mission_desc":        mission_state.get("desc"),
-        # 링크 상태
-        "ticn_loss_pct":       ticn.get("loss_pct", 0),
-        "ticn_link_quality":   ticn.get("link_quality", 100),
-        # Fail-safe 정책
-        "hb_timeout_sec":      policy.get("heartbeat", {}).get("timeout_sec", 5),
-        "hb_interval_sec":     policy.get("heartbeat", {}).get("interval_sec", 1),
-        "hb_max_miss":         policy.get("heartbeat", {}).get("max_miss_count", 5),
-        "loss_warning_pct":    policy.get("packet_loss", {}).get("warning_pct", 10),
-        "loss_critical_pct":   policy.get("packet_loss", {}).get("critical_pct", 15),
-        "loss_duration_sec":   policy.get("packet_loss", {}).get("critical_duration_sec", 2),
-        "latency_warning_ms":  policy.get("latency", {}).get("warning_ms", 500),
-        "latency_critical_ms": policy.get("latency", {}).get("critical_ms", 1500),
-        "failsafe_action":     policy.get("failsafe_action", "LOITER"),
+def _send_event(message: str, level: str = "info", detail: str = "", status: str = "") -> None:
+    event = {
+        "platform_type": "AGENT",
+        "agent_type": "ATK",
+        "platform_id": "ATK-RECON",
+        "source": "PIPELINE-RECON",
+        "message": message,
+        "detail": detail,
+        "level": level,
+        "status": status,
+        "time": time.strftime("%H:%M:%S"),
     }
+    try:
+        _evt_sock.sendto(json.dumps(event).encode("utf-8"), (DASHBOARD_HOST, DASHBOARD_PORT))
+    except Exception:
+        pass
 
-    print(f"\n[RECON-P0] API 사전 정찰 완료 (요청 {http_requests}회)", flush=True)
-    print(f"  UAV 위치: lat={baseline['uav_lat']} lon={baseline['uav_lon']} "
-          f"고도={baseline['uav_alt']}m 모드={baseline['uav_mode']}", flush=True)
-    print(f"  연료={baseline['uav_fuel']}%  TICN 손실={baseline['ticn_loss_pct']}%", flush=True)
-    print(f"  임무 단계={baseline['mission_phase']}  Fail-safe 정책: "
-          f"HB timeout={baseline['hb_timeout_sec']}s  "
-          f"loss critical={baseline['loss_critical_pct']}%  "
-          f"action={baseline['failsafe_action']}", flush=True)
-
-    _send_event(
-        "Phase 0 완료 — 운용 상태 및 Fail-safe 정책 수집",
-        level="warn",
-        detail=(f"UAV alt={baseline['uav_alt']}m mode={baseline['uav_mode']} "
-                f"hb_timeout={baseline['hb_timeout_sec']}s "
-                f"loss_critical={baseline['loss_critical_pct']}%"),
-        status="ALERT",
-    )
-    return baseline
-
-
-# ── 유틸 ──────────────────────────────────────────────────────────────────
 
 def _add_unique(values: list[Any], value: Any, limit: int = 20) -> None:
     if value is None or value in values:
@@ -200,66 +80,97 @@ def _meters_per_lon_degree(lat_deg: float) -> float:
     return max(1.0, 111_320.0 * math.cos(math.radians(lat_deg)))
 
 
+def _is_in_operational_area(lat: float | None, lon: float | None) -> bool | None:
+    if lat is None or lon is None:
+        return None
+    return OA_LAT_MIN <= lat <= OA_LAT_MAX and OA_LON_MIN <= lon <= OA_LON_MAX
+
+
+def phase0_api_recon() -> dict[str, Any]:
+    baseline: dict[str, Any] = {"http_requests": 0, "api_available": False}
+    try:
+        with urllib.request.urlopen(f"{DASHBOARD_URL}/api/live", timeout=3) as response:
+            live = json.loads(response.read())
+        baseline["http_requests"] += 1
+        baseline["api_available"] = True
+    except Exception as exc:
+        live = {}
+        baseline["live_error"] = str(exc)
+    try:
+        with urllib.request.urlopen(f"{DASHBOARD_URL}/api/failsafe", timeout=3) as response:
+            policy = json.loads(response.read())
+        baseline["http_requests"] += 1
+    except Exception as exc:
+        policy = {}
+        baseline["failsafe_error"] = str(exc)
+
+    platforms = {p.get("platform_id"): p for p in live.get("platforms", [])}
+    uav = platforms.get(UAV_PLATFORM_ID, {})
+    ticn = uav.get("ticn", {}) if isinstance(uav.get("ticn"), dict) else {}
+    mission_state = live.get("mission_state", {}) if isinstance(live.get("mission_state"), dict) else {}
+
+    baseline.update({
+        "uav_lat": uav.get("lat"),
+        "uav_lon": uav.get("lon"),
+        "uav_alt": uav.get("alt"),
+        "uav_mode": uav.get("mode"),
+        "uav_fuel": uav.get("fuel", uav.get("battery")),
+        "uav_speed": uav.get("speed"),
+        "uav_status": uav.get("status"),
+        "mission_phase": mission_state.get("phase"),
+        "mission_desc": mission_state.get("desc"),
+        "ticn_loss_pct": ticn.get("loss_pct", 0),
+        "ticn_link_quality": ticn.get("link_quality", 100),
+        "hb_timeout_sec": policy.get("heartbeat", {}).get("timeout_sec", 5),
+        "loss_critical_pct": policy.get("packet_loss", {}).get("critical_pct", 15),
+        "latency_critical_ms": policy.get("latency", {}).get("critical_ms", 1500),
+        "failsafe_action": policy.get("failsafe_action", "LOITER"),
+    })
+    return baseline
+
+
 def _speed_from_positions(prev: dict[str, Any], cur: dict[str, Any]) -> float | None:
     dt = float(cur.get("received_s", 0.0)) - float(prev.get("received_s", 0.0))
     if dt <= 0.05:
         return None
     lat = float(prev["lat_deg"])
     north_m = (float(cur["lat_deg"]) - lat) * 111_320.0
-    east_m  = (float(cur["lon_deg"]) - float(prev["lon_deg"])) * _meters_per_lon_degree(lat)
+    east_m = (float(cur["lon_deg"]) - float(prev["lon_deg"])) * _meters_per_lon_degree(lat)
     return math.sqrt(north_m * north_m + east_m * east_m) / dt
 
-
-def _is_in_operational_area(lat: float | None, lon: float | None) -> bool | None:
-    """UAV-001의 정찰 작전구역(경기 북부) 내 위치 여부."""
-    if lat is None or lon is None:
-        return None
-    return (OA_LAT_MIN <= lat <= OA_LAT_MAX) and (OA_LON_MIN <= lon <= OA_LON_MAX)
-
-
-# ── 신뢰도 팩터 ───────────────────────────────────────────────────────────
 
 def _physical_consistency_check(rec: dict[str, Any]) -> bool:
     samples = rec.get("position_history", [])
     if len(samples) < 2:
         return False
     calculated = _speed_from_positions(samples[-2], samples[-1])
-    reported   = rec.get("ground_speed_mps")
+    reported = rec.get("ground_speed_mps")
     if calculated is None or reported is None:
         return False
-    # 송골매는 최대 ~170m/s; 정지 시 양쪽 모두 작은 값이면 일치
     if calculated < 1.0 and float(reported) < 2.0:
         return True
     if calculated <= 0 or float(reported) <= 0:
         return False
     ratio = max(calculated, float(reported)) / max(0.01, min(calculated, float(reported)))
-    return ratio < 4.0   # 고속 항공기 허용 비율 (DAH_temp 3.0 → 4.0으로 완화)
+    return ratio < 4.5
 
 
 def _cross_message_validation(rec: dict[str, Any]) -> bool:
-    # 무장 상태에서 고도가 비정상적으로 낮으면 이상
     if rec.get("is_armed") and rec.get("alt_m", 0) < -10:
         return False
-    # ACTIVE 상태인데 위치 샘플이 없으면 의심
     if rec.get("system_status") == "ACTIVE" and rec.get("position_samples", 0) == 0:
         return False
-    # 배터리 음수 이상
-    if rec.get("battery_pct", 50) is not None and rec.get("battery_pct", 50) < -1:
+    if rec.get("battery_pct") is not None and float(rec.get("battery_pct")) < -1:
         return False
     return bool(rec.get("last_heartbeat") or rec.get("position_samples", 0) > 0)
 
 
-def _frame_integrity_factor(rec: dict[str, Any]) -> tuple[float, str]:
-    invalid  = int(rec.get("crc_invalid_frames", 0))
-    valid    = int(rec.get("crc_valid_frames",   0))
-    unknown  = int(rec.get("crc_unknown_frames", 0))
-    if invalid > 0:
-        return 0.0,  f"crc_invalid={invalid}"
-    if valid > 0:
-        return 0.15, f"crc_valid={valid}"
-    if unknown > 0:
-        return 0.08, f"crc_unknown={unknown}"
-    return 0.0, "no_crc_metadata"
+def confidence_label(score: float) -> str:
+    if score >= CONF_HIGH:
+        return "HIGH - usable for controlled follow-on validation"
+    if score >= CONF_MEDIUM:
+        return "MEDIUM - short-window revalidation recommended"
+    return "LOW - incomplete or stale observation"
 
 
 def confidence_details(rec: dict[str, Any], now_s: float | None = None) -> dict[str, Any]:
@@ -278,339 +189,56 @@ def confidence_details(rec: dict[str, Any], now_s: float | None = None) -> dict[
     cross_ok = _cross_message_validation(rec)
     factors["cross_message_validation"] = {"ok": cross_ok, "weight": 0.15 if cross_ok else 0.0}
 
-    integrity_weight, integrity_note = _frame_integrity_factor(rec)
-    factors["frame_integrity"] = {"ok": integrity_weight > 0, "weight": integrity_weight, "note": integrity_note}
+    integrity_ok = rec.get("crc_valid_frames", 0) > 0 or rec.get("json_frames", 0) > 0
+    integrity_note = "json_pipeline" if rec.get("json_frames", 0) > 0 else f"crc_valid={rec.get('crc_valid_frames', 0)}"
+    factors["frame_or_pipeline_integrity"] = {
+        "ok": integrity_ok,
+        "weight": 0.15 if integrity_ok else 0.0,
+        "note": integrity_note,
+    }
 
     last_seen = rec.get("last_seen")
     fresh = bool(last_seen and now - float(last_seen) <= 90.0)
     factors["freshness"] = {"ok": fresh, "weight": 0.10 if fresh else 0.0}
 
     score = round(sum(item["weight"] for item in factors.values()), 2)
-    return {"score": min(1.0, score), "label": _confidence_label(score), "factors": factors}
+    return {"score": min(1.0, score), "label": confidence_label(score), "factors": factors}
 
 
-def _confidence_score(rec: dict[str, Any]) -> float:
+def confidence_score(rec: dict[str, Any]) -> float:
     return float(confidence_details(rec)["score"])
 
-
-def _confidence_label(score: float) -> str:
-    if score >= CONF_HIGH:
-        return "HIGH — 후속 에이전트 실행 가능"
-    if score >= CONF_MEDIUM:
-        return "MEDIUM — 재검증 권고"
-    return "LOW — 지연/스푸핑/불완전 관측"
-
-
-# ── 행동 패턴 분류 (DAH_SMU UAV-001 상황 맞춤) ───────────────────────────
-
-def classify_pattern(rec: dict[str, Any]) -> str:
-    samples = rec.get("position_history", [])
-    speed   = float(rec.get("ground_speed_mps") or 0.0)
-
-    if rec.get("mission_upload_in_progress"):
-        return "MISSION_UPLOAD_ACTIVITY"
-    if rec.get("command_acks") or rec.get("command_long_seen"):
-        return "COMMAND_ACTIVITY"
-
-    if len(samples) >= 3:
-        alt_delta = samples[-1]["alt_m"] - samples[0]["alt_m"]
-        heading_vals = [float(s.get("heading_deg") or 0.0) for s in samples[-5:]]
-        heading_span  = max(heading_vals) - min(heading_vals) if heading_vals else 0.0
-
-        if alt_delta < -50 and speed < 100:   # 하강 중 (송골매 기준 하강속도)
-            return "DESCENT_OR_RTL"
-        if heading_span > 30:                  # 웨이포인트 선회
-            return "PATROL_TURNING"
-
-    if speed < 10 and rec.get("position_samples", 0) >= 2:
-        return "LOITER_HOLDING"   # Fail-safe 또는 HOLD 명령
-
-    if speed > 80:                             # 송골매 순항 속도 (600km/h)
-        in_oa = _is_in_operational_area(rec.get("lat_deg"), rec.get("lon_deg"))
-        if in_oa is True:
-            return "PATROL_TRANSIT"
-        if in_oa is False:
-            return "OUT_OF_AREA"   # 작전구역 이탈 — 스푸핑 가능성
-
-    if rec.get("mission_seq") is not None:
-        return "MISSION_PROGRESS"
-    if rec.get("position_samples", 0):
-        return "TRANSIT"
-    return "INSUFFICIENT_DATA"
-
-
-def predict_position(rec: dict[str, Any], horizon_s: int) -> dict[str, Any] | None:
-    if rec.get("lat_deg") is None or not rec.get("velocity_mps"):
-        return None
-    lat, lon  = float(rec["lat_deg"]), float(rec["lon_deg"])
-    alt       = float(rec.get("alt_m") or 0.0)
-    vx_north, vy_east, vz_down = [float(v) for v in rec.get("velocity_mps", [0.0, 0.0, 0.0])]
-    pred_lat  = lat + (vx_north * horizon_s) / 111_320.0
-    pred_lon  = lon + (vy_east  * horizon_s) / _meters_per_lon_degree(lat)
-    pred_alt  = alt - vz_down * horizon_s
-    pattern   = classify_pattern(rec)
-    penalty   = 50.0 if pattern in {"PATROL_TURNING", "DESCENT_OR_RTL", "COMMAND_ACTIVITY"} else 15.0
-    base_err  = penalty + 0.5 * horizon_s   # 고속 항공기 → 오차 더 큼
-    in_oa     = _is_in_operational_area(round(pred_lat, 7), round(pred_lon, 7))
-    return {
-        "model":              "constant_velocity_short_horizon",
-        "horizon_s":          horizon_s,
-        "lat":                round(pred_lat, 7),
-        "lon":                round(pred_lon, 7),
-        "alt_m":              round(pred_alt, 1),
-        "expected_error_m":   round(base_err, 1),
-        "in_operational_area": in_oa,
-        "limits":             "단기 시나리오 선택 전용; 후속 에이전트 실행 전 재검증 필수",
-    }
-
-
-# ── Phase 4: DAH_SMU 후속 에이전트 매핑 ─────────────────────────────────
-
-def dah_smu_follow_on(
-    rec: dict[str, Any],
-    score: float,
-    baseline: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """
-    신뢰도와 UAV 상태를 기반으로 DAH_SMU 실제 에이전트 목록을 반환.
-    각 후보는 agent, action, reason, params 필드를 포함.
-    """
-    if score < CONF_MEDIUM:
-        return []
-
-    candidates: list[dict[str, Any]] = []
-    armed    = bool(rec.get("is_armed"))
-    alt_m    = float(rec.get("alt_m") or 0.0)
-    lat      = rec.get("lat_deg")
-    lon      = rec.get("lon_deg")
-    pattern  = classify_pattern(rec)
-    in_oa    = _is_in_operational_area(lat, lon)
-
-    # ── dah-executor: LAND 명령 주입 ─────────────────────────────────────
-    # 조건: 무장 + 고도 >500m + HIGH 신뢰도
-    if armed and alt_m > 500 and score >= CONF_HIGH:
-        candidates.append({
-            "agent":  "dah-executor",
-            "action": "LAND-INJECT",
-            "reason": f"UAV 무장 + 고도 {alt_m:.0f}m → LAND 명령 주입 타이밍 적합",
-            "timing": "즉시 실행 가능" if alt_m > 1000 else "저고도 — 효과 제한적",
-            "params": {
-                "target_host": UAV_HOST,
-                "cmd_port":    UAV_CMD_PORT,
-                "sys_id":      rec.get("sys_id", UAV_SYS_ID),
-                "attacker_sys_id": 99,
-            },
-        })
-    elif armed and alt_m <= 500:
-        candidates.append({
-            "agent":  "dah-executor",
-            "action": "LAND-INJECT (저고도 — 효과 제한)",
-            "reason": f"UAV 무장이나 고도 {alt_m:.0f}m — 이미 착륙 접근 중",
-            "timing": "보류 — 재검증 후 결정",
-            "params": {},
-        })
-
-    # ── dah-spoofer: GPS 좌표 위조 ────────────────────────────────────────
-    # 조건: 위치 파악 완료
-    if lat is not None and lon is not None:
-        candidates.append({
-            "agent":  "dah-spoofer",
-            "action": "GPS-SPOOF",
-            "reason": "UAV 현재 위치 확보 — 스푸핑 시작 좌표 준비 완료",
-            "timing": "PATROL_TRANSIT 또는 MISSION_PROGRESS 중 주입 효과 최대",
-            "params": {
-                "gcs_host":    "dah-gcs",
-                "gcs_port":    14555,
-                "start_lat":   lat,
-                "start_lon":   lon,
-                "start_alt":   alt_m,
-                "spoof_target_lat": 38.50,   # 현재 spoofer.py 하드코딩값
-                "spoof_target_lon": 126.60,
-                "in_oa_at_recon": in_oa,
-            },
-        })
-
-    # ── dah-jammer: TMMR 전파 재밍 ───────────────────────────────────────
-    # 조건: 링크 상태 모니터링 완료 + 비행 중 (패턴이 LOITER가 아닌 경우 효과적)
-    drop_rate = float(rec.get("drop_rate_comm") or 0.0)
-    jam_optimal = pattern in {"PATROL_TRANSIT", "PATROL_TURNING", "MISSION_PROGRESS", "TRANSIT"}
-    candidates.append({
-        "agent":  "dah-jammer",
-        "action": "TMMR-JAM",
-        "reason": (
-            f"링크 모니터링 완료 (drop_rate={drop_rate:.0f}) — "
-            f"{'비행 중 주입 효과 최대' if jam_optimal else 'LOITER 중 주입 — 즉각 반응 약함'}"
-        ),
-        "timing": "즉시 가능" if jam_optimal else "비행 복귀 후 주입 권장",
-        "params": {
-            "router_host": AGENT_JAMMER_HOST,
-            "jam_port":    AGENT_JAM_PORT,
-            "channels":    ["VHF", "UHF", "HF"],
-            "duration_s":  14,
-            "interval_s":  6,
-        },
-    })
-
-    # ── dah-inducer: Fail-safe 유도 ───────────────────────────────────────
-    # 조건: API 사전 정찰에서 fail-safe 정책 수집 완료
-    if baseline and baseline.get("api_available"):
-        hb_to  = baseline.get("hb_timeout_sec", 5)
-        lc_pct = baseline.get("loss_critical_pct", 15)
-        lat_ms = baseline.get("latency_critical_ms", 1500)
-        candidates.append({
-            "agent":  "dah-inducer",
-            "action": "FAILSAFE-INDUCE",
-            "reason": (
-                f"Fail-safe 정책 확보 — "
-                f"HB timeout={hb_to}s, loss critical={lc_pct}%, "
-                f"latency critical={lat_ms}ms, action={baseline.get('failsafe_action')}"
-            ),
-            "timing": "4단계 순차 실행 (HB누락→손실률→지연→간헐적)",
-            "params": {
-                "hb_timeout_sec":      hb_to,
-                "hb_max_miss":         baseline.get("hb_max_miss", 5),
-                "loss_critical_pct":   lc_pct,
-                "latency_critical_ms": lat_ms,
-                "failsafe_action":     baseline.get("failsafe_action", "LOITER"),
-                "dashboard_host":      DASHBOARD_HOST,
-                "router_host":         AGENT_JAMMER_HOST,
-            },
-        })
-
-    return candidates
-
-
-def timing_recommendations(rec: dict[str, Any], score: float) -> list[dict[str, str]]:
-    if score < CONF_MEDIUM:
-        return [{"status": "hold", "reason": "신뢰도 MEDIUM 미만 — 재검증 필요"}]
-    pattern = classify_pattern(rec)
-    alt_m   = float(rec.get("alt_m") or 0.0)
-    armed   = bool(rec.get("is_armed"))
-
-    if pattern == "LOITER_HOLDING":
-        return [{"candidate": "dah-inducer", "reason": "LOITER 상태 — Fail-safe 유도로 복귀 지연 유발"}]
-    if pattern == "PATROL_TURNING":
-        return [{"candidate": "dah-spoofer", "reason": "선회 기동 — 소폭 좌표 변화가 GCS 탐지 회피 유리"}]
-    if pattern == "DESCENT_OR_RTL":
-        return [{"candidate": "dah-jammer", "reason": "귀환 중 — 링크 두절 시 LOITER 지속 또는 방어 회피"}]
-    if pattern == "PATROL_TRANSIT" and armed and alt_m > 1000:
-        return [{"candidate": "dah-executor", "reason": f"순항 중 + 무장 + 고도 {alt_m:.0f}m — LAND 주입 최적"}]
-    if pattern == "OUT_OF_AREA":
-        return [{"candidate": "dah-spoofer", "reason": "작전구역 이탈 감지 — 스푸핑으로 이탈 가속 가능"}]
-    if pattern == "MISSION_UPLOAD_ACTIVITY":
-        return [{"candidate": "dah-inducer", "reason": "미션 업로드 중 — 링크 저하로 업로드 실패 유발"}]
-    return [{"candidate": "dah-jammer", "reason": f"패턴={pattern} — 재밍으로 상태 변화 관측 후 재분석"}]
-
-
-# ── Blue-team 매핑 (DAH_SMU 환경 기준) ───────────────────────────────────
-
-def blue_team_mapping() -> list[dict[str, Any]]:
-    return [
-        {
-            "layer":                 "GCS 어플리케이션 감사로그",
-            "expected_visibility":   "낮음 (Phase 1 기준) / 중간 (Phase 0 포함 시)",
-            "reason":                "Phase 0에서 Dashboard HTTP 요청 2회 발생; Phase 1은 UDP 수신만",
-            "recommended_control":   "Dashboard → GCS API 호출 로그 수집 + 비정상 접근 출처 검출",
-            "dah_smu_component":     "dah-dashboard /api/live, /api/failsafe",
-        },
-        {
-            "layer":                 "네트워크 IDS / dah-net 모니터",
-            "expected_visibility":   "중간",
-            "reason":                "UDP 14550 브로드캐스트는 다중 수신 가능; dah-recon 컨테이너 식별 어려움",
-            "recommended_control":   "dah-net 세그먼트의 비인가 UDP bind 이벤트 경보",
-            "dah_smu_component":     "docker network: dah-net (172.20.0.0/24)",
-        },
-        {
-            "layer":                 "컨테이너 런타임 / Docker 이벤트",
-            "expected_visibility":   "높음",
-            "reason":                "cyber-lab 프로파일 컨테이너 시작/커맨드라인/stdout은 Docker 이벤트로 관측",
-            "recommended_control":   "docker events 모니터링 + 비인가 프로파일 컨테이너 기동 감사",
-            "dah_smu_component":     "dah-recon (cyber-lab profile, 172.20.0.40)",
-        },
-        {
-            "layer":                 "호스트 EDR / eBPF",
-            "expected_visibility":   "중간-높음",
-            "reason":                "SO_REUSEADDR + SO_REUSEPORT로 14550 bind — 프로세스 소켓 이벤트 추적 가능",
-            "recommended_control":   "UDP 14550 bind 이벤트 + 172.20.0.40 출처 트래픽 감사",
-            "dah_smu_component":     "attack_agent/recon.py 소켓 개방",
-        },
-        {
-            "layer":                 "프로토콜 모니터 / MAVLink 서명",
-            "expected_visibility":   "노출=높음 / 수신자 식별=낮음",
-            "reason":                "MAVLink 서명 없이 브로드캐스트되면 평문 텔레메트리 전체 노출",
-            "recommended_control":   "MAVLink v2 서명 강제 적용 + 브로드캐스트 범위 축소 (단방향 unicast)",
-            "dah_smu_component":     "uav/mock_uav.py → 172.20.0.255:14550 브로드캐스트",
-        },
-    ]
-
-
-def ghost_sentinel_assessment() -> dict[str, Any]:
-    return {
-        "implemented":   False,
-        "purpose":       "위협 모델 비교용; 이 모듈은 raw socket/CAP_NET_RAW 없음",
-        "would_reduce":  ["UDP 14550 bind 테이블 가시성", "컨테이너 커맨드라인 노출"],
-        "would_introduce": [
-            "CAP_NET_RAW 정책 이벤트",
-            "AF_PACKET 소켓 텔레메트리",
-            "dah-net 내 모든 IP 패킷 수신 (unicast 포함)",
-        ],
-        "defensive_question": (
-            "dah-net 내에서 AF_PACKET 소켓을 개방하는 컨테이너를 탐지할 수 있는가? "
-            "현재 UDP bind 모니터만으로는 Ghost Sentinel을 탐지하지 못한다."
-        ),
-    }
-
-
-# ── IntelligenceReport ────────────────────────────────────────────────────
 
 class IntelligenceReport:
     def __init__(self) -> None:
         self.assets: dict[int, dict[str, Any]] = {}
-        self.packet_count    = 0
-        self.parse_errors    = 0
+        self.packet_count = 0
+        self.parse_errors = 0
         self.unknown_msg_count = 0
         self.msg_type_counts: dict[str, int] = {}
-        self.signed_frames    = 0
-        self.unsigned_frames  = 0
-        self.crc_valid_frames   = 0
+        self.pipeline_sources: dict[str, int] = {}
+        self.signed_frames = 0
+        self.unsigned_frames = 0
+        self.crc_valid_frames = 0
         self.crc_invalid_frames = 0
         self.crc_unknown_frames = 0
+        self.json_packet_count = 0
         self.start_time = time.time()
 
     def _get(self, sys_id: int) -> dict[str, Any]:
         if sys_id not in self.assets:
             self.assets[sys_id] = {
-                "sys_id":          sys_id,
-                "first_seen":      time.time(),
-                "last_seen":       None,
-                "packet_count":    0,
-                "source_ips":      [],
-                "message_counts":  {},
+                "sys_id": sys_id,
+                "first_seen": time.time(),
+                "last_seen": None,
+                "packet_count": 0,
+                "source_ips": [],
+                "message_counts": {},
                 "position_history": [],
-                "command_acks":    [],
-                "mission_items":   [],
+                "command_acks": [],
+                "mission_items": [],
             }
         return self.assets[sys_id]
-
-    def record_frame(self, frame: ParsedMavlinkFrame, source_ip: str) -> dict[str, Any]:
-        rec = self._get(frame.system_id)
-        rec["packet_count"]  += 1
-        rec["last_seen"]      = time.time()
-        rec["component_id"]   = frame.component_id
-        rec["last_sequence"]  = frame.sequence
-        rec["last_message"]   = frame.message_name
-        rec["signed_frames"]  = rec.get("signed_frames",  0) + (1 if frame.signed else 0)
-        rec["unsigned_frames"] = rec.get("unsigned_frames", 0) + (0 if frame.signed else 1)
-        if frame.crc_valid is True:
-            rec["crc_valid_frames"]   = rec.get("crc_valid_frames",   0) + 1
-        elif frame.crc_valid is False:
-            rec["crc_invalid_frames"] = rec.get("crc_invalid_frames", 0) + 1
-        else:
-            rec["crc_unknown_frames"] = rec.get("crc_unknown_frames", 0) + 1
-        _add_unique(rec["source_ips"], source_ip)
-        counts = rec["message_counts"]
-        counts[frame.message_name] = counts.get(frame.message_name, 0) + 1
-        return rec
 
     def record_msg_type(self, name: str) -> None:
         self.msg_type_counts[name] = self.msg_type_counts.get(name, 0) + 1
@@ -627,45 +255,120 @@ class IntelligenceReport:
         else:
             self.crc_unknown_frames += 1
 
-    def update_heartbeat(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec = self._get(sys_id)
-        rec["mav_type"]       = MAV_TYPE.get(fields.get("type", -1), f"TYPE_{fields.get('type')}")
-        rec["system_status"]  = MAV_STATE.get(fields.get("system_status", -1), "UNKNOWN")
-        rec["base_mode"]      = fields.get("base_mode", 0)
-        rec["is_armed"]       = bool(fields.get("base_mode", 0) & 0x80)
-        rec["is_guided"]      = bool(fields.get("base_mode", 0) & 0x08)
-        rec["last_heartbeat"] = time.time()
+    def record_frame(self, frame: ParsedMavlinkFrame, source_ip: str) -> None:
+        rec = self._get(frame.system_id)
+        rec["packet_count"] += 1
+        rec["last_seen"] = time.time()
+        rec["component_id"] = frame.component_id
+        rec["last_sequence"] = frame.sequence
+        rec["last_message"] = frame.message_name
+        rec["signed_frames"] = rec.get("signed_frames", 0) + (1 if frame.signed else 0)
+        rec["unsigned_frames"] = rec.get("unsigned_frames", 0) + (0 if frame.signed else 1)
+        if frame.crc_valid is True:
+            rec["crc_valid_frames"] = rec.get("crc_valid_frames", 0) + 1
+        elif frame.crc_valid is False:
+            rec["crc_invalid_frames"] = rec.get("crc_invalid_frames", 0) + 1
+        else:
+            rec["crc_unknown_frames"] = rec.get("crc_unknown_frames", 0) + 1
+        _add_unique(rec["source_ips"], source_ip)
+        counts = rec["message_counts"]
+        counts[frame.message_name] = counts.get(frame.message_name, 0) + 1
 
-    def update_position(self, sys_id: int, fields: dict[str, Any], *, message_name: str) -> None:
+        fields = frame.fields
+        if frame.message_name == "HEARTBEAT":
+            rec["mav_type"] = MAV_TYPE.get(fields.get("type", -1), f"TYPE_{fields.get('type')}")
+            rec["system_status"] = MAV_STATE.get(fields.get("system_status", -1), "UNKNOWN")
+            rec["base_mode"] = fields.get("base_mode", 0)
+            rec["is_armed"] = bool(fields.get("base_mode", 0) & 0x80)
+            rec["is_guided"] = bool(fields.get("base_mode", 0) & 0x08)
+            rec["last_heartbeat"] = time.time()
+        elif frame.message_name in {"GLOBAL_POSITION_INT", "UTM_GLOBAL_POSITION"}:
+            self._record_position(rec, {
+                "lat": fields.get("lat", 0) / 1e7,
+                "lon": fields.get("lon", 0) / 1e7,
+                "alt": fields.get("alt", 0) / 1000.0,
+                "speed_mps": math.sqrt((fields.get("vx", 0) / 100.0) ** 2 + (fields.get("vy", 0) / 100.0) ** 2),
+                "heading_deg": fields.get("hdg", 0) / 100.0,
+                "message": frame.message_name,
+            })
+        elif frame.message_name == "SYS_STATUS":
+            rec["battery_pct"] = fields.get("battery_remaining", -1)
+            rec["drop_rate_comm"] = fields.get("drop_rate_comm", 0)
+            rec["errors_comm"] = fields.get("errors_comm", 0)
+
+    def record_json_telemetry(self, payload: dict[str, Any], source_ip: str) -> None:
+        platform_id = str(payload.get("platform_id") or payload.get("target_platform_id") or "UNKNOWN")
+        if platform_id == UAV_PLATFORM_ID:
+            sys_id = UAV_SYS_ID
+        elif platform_id.startswith("UGV"):
+            sys_id = int(payload.get("sys_id") or 20)
+        else:
+            sys_id = int(payload.get("sys_id") or 900)
+
         rec = self._get(sys_id)
-        lat     = fields.get("lat", 0) / 1e7
-        lon     = fields.get("lon", 0) / 1e7
-        alt     = fields.get("alt", 0) / 1000.0
-        rel_alt = fields.get("relative_alt", fields.get("alt", 0)) / 1000.0
-        vx  = fields.get("vx", 0) / 100.0
-        vy  = fields.get("vy", 0) / 100.0
-        vz  = fields.get("vz", 0) / 100.0
-        hdg = fields.get("hdg", 0) / 100.0
+        rec["packet_count"] += 1
+        rec["last_seen"] = time.time()
+        rec["platform_id"] = platform_id
+        rec["source_pipeline"] = "gcs_json_fanout"
+        rec["last_message"] = payload.get("message_type", "JSON_TELEMETRY")
+        rec["json_frames"] = rec.get("json_frames", 0) + 1
+        rec["component_id"] = rec.get("component_id", 0)
+        _add_unique(rec["source_ips"], source_ip)
+
+        source = str(payload.get("source") or "unknown")
+        self.pipeline_sources[source] = self.pipeline_sources.get(source, 0) + 1
+        self.record_msg_type("JSON_TELEMETRY")
+        counts = rec["message_counts"]
+        counts["JSON_TELEMETRY"] = counts.get("JSON_TELEMETRY", 0) + 1
+
+        lat = payload.get("lat")
+        lon = payload.get("lon")
+        alt = payload.get("alt")
+        if lat is not None and lon is not None:
+            speed_kmh = float(payload.get("speed") or 0.0)
+            self._record_position(rec, {
+                "lat": float(lat),
+                "lon": float(lon),
+                "alt": float(alt or 0.0),
+                "speed_mps": speed_kmh / 3.6,
+                "heading_deg": float(payload.get("heading") or payload.get("hdg") or 0.0),
+                "message": "JSON_TELEMETRY",
+            })
+
+        rec["mav_type"] = "FIXED_WING" if platform_id == UAV_PLATFORM_ID else payload.get("platform_type", "UNKNOWN")
+        rec["system_status"] = payload.get("status") or "ACTIVE"
+        rec["is_armed"] = True if platform_id == UAV_PLATFORM_ID else rec.get("is_armed", False)
+        rec["is_guided"] = True if platform_id == UAV_PLATFORM_ID else rec.get("is_guided", False)
+        rec["last_heartbeat"] = time.time()
+        if payload.get("fuel") is not None:
+            rec["battery_pct"] = payload.get("fuel")
+        elif payload.get("battery") is not None:
+            rec["battery_pct"] = payload.get("battery")
+        ticn = payload.get("ticn") if isinstance(payload.get("ticn"), dict) else {}
+        rec["drop_rate_comm"] = ticn.get("loss_pct", rec.get("drop_rate_comm", 0))
+        rec["pipeline_seq"] = payload.get("seq")
+
+    def _record_position(self, rec: dict[str, Any], item: dict[str, Any]) -> None:
         sample = {
-            "received_s":  time.time(),
-            "message":     message_name,
-            "lat_deg":     round(lat, 7),
-            "lon_deg":     round(lon, 7),
-            "alt_m":       round(alt, 1),
-            "rel_alt_m":   round(rel_alt, 1),
-            "vx_mps":      round(vx, 2),
-            "vy_mps":      round(vy, 2),
-            "vz_mps":      round(vz, 2),
-            "heading_deg": round(hdg, 1),
+            "received_s": time.time(),
+            "message": item["message"],
+            "lat_deg": round(float(item["lat"]), 7),
+            "lon_deg": round(float(item["lon"]), 7),
+            "alt_m": round(float(item["alt"]), 1),
+            "rel_alt_m": round(float(item["alt"]), 1),
+            "vx_mps": round(float(item["speed_mps"]), 2),
+            "vy_mps": 0.0,
+            "vz_mps": 0.0,
+            "heading_deg": round(float(item["heading_deg"]), 1),
         }
         rec.update({
-            "lat_deg":          sample["lat_deg"],
-            "lon_deg":          sample["lon_deg"],
-            "alt_m":            sample["alt_m"],
-            "rel_alt_m":        sample["rel_alt_m"],
-            "velocity_mps":     [sample["vx_mps"], sample["vy_mps"], sample["vz_mps"]],
-            "ground_speed_mps": round(math.sqrt(vx**2 + vy**2), 2),
-            "heading_deg":      sample["heading_deg"],
+            "lat_deg": sample["lat_deg"],
+            "lon_deg": sample["lon_deg"],
+            "alt_m": sample["alt_m"],
+            "rel_alt_m": sample["rel_alt_m"],
+            "velocity_mps": [sample["vx_mps"], 0.0, 0.0],
+            "ground_speed_mps": sample["vx_mps"],
+            "heading_deg": sample["heading_deg"],
             "position_samples": rec.get("position_samples", 0) + 1,
             "in_operational_area": _is_in_operational_area(sample["lat_deg"], sample["lon_deg"]),
         })
@@ -675,170 +378,182 @@ class IntelligenceReport:
             del history[0]
         rec["trail"] = [[p["lat_deg"], p["lon_deg"], p["alt_m"]] for p in history[-20:]]
 
-    def update_sys_status(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec = self._get(sys_id)
-        rec["battery_pct"]    = fields.get("battery_remaining", -1)
-        rec["drop_rate_comm"] = fields.get("drop_rate_comm", 0)
-        rec["errors_comm"]    = fields.get("errors_comm", 0)
-
-    def note_command_ack(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec  = self._get(sys_id)
-        acks = rec.setdefault("command_acks", [])
-        cmd  = fields.get("command")
-        acks.append({
-            "command":      cmd,
-            "command_name": COMMAND_NAMES.get(cmd, f"CMD_{cmd}"),
-            "result":       COMMAND_ACK_RESULT.get(fields.get("result", -1), f"RESULT_{fields.get('result')}"),
-            "seen_s":       time.time(),
-        })
-        if len(acks) > 10:
-            del acks[0]
-
-    def note_command_long(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec      = self._get(sys_id)
-        commands = rec.setdefault("command_long_seen", [])
-        cmd      = fields.get("command")
-        commands.append({
-            "command":          cmd,
-            "command_name":     COMMAND_NAMES.get(cmd, f"CMD_{cmd}"),
-            "target_system":    fields.get("target_system"),
-            "target_component": fields.get("target_component"),
-            "seen_s":           time.time(),
-        })
-        if len(commands) > 10:
-            del commands[0]
-
-    def note_mission_current(self, sys_id: int, fields: dict[str, Any]) -> None:
-        self._get(sys_id)["mission_seq"] = fields.get("seq")
-
-    def note_mission_count(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec = self._get(sys_id)
-        rec["mission_count"] = fields.get("count")
-        rec["mission_upload_in_progress"] = True
-
-    def note_mission_ack(self, sys_id: int, fields: dict[str, Any]) -> None:
-        self._get(sys_id)["last_mission_ack"] = MISSION_ACK_TYPE.get(
-            fields.get("type", -1), f"ACK_{fields.get('type')}"
-        )
-
-    def note_mission_request(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec = self._get(sys_id)
-        rec["mission_upload_in_progress"] = True
-        rec["mission_upload_seq"] = fields.get("seq")
-
-    def note_mission_item(self, sys_id: int, fields: dict[str, Any]) -> None:
-        rec   = self._get(sys_id)
-        items = rec.setdefault("mission_items", [])
-        items.append({
-            "seq":     fields.get("seq"),
-            "command": fields.get("command"),
-            "x": fields.get("x"),
-            "y": fields.get("y"),
-            "z": fields.get("z"),
-        })
-        if len(items) > 10:
-            del items[0]
-
     def sanitized_assets(self) -> dict[str, Any]:
         return {str(sid): dict(rec) for sid, rec in self.assets.items()}
 
     def summary(self) -> dict[str, Any]:
         return {
-            "packet_count":       self.packet_count,
-            "parse_errors":       self.parse_errors,
-            "unknown_msgs":       self.unknown_msg_count,
-            "asset_count":        len(self.assets),
-            "uav001_identified":  UAV_SYS_ID in self.assets,
-            "msg_type_counts":    dict(sorted(self.msg_type_counts.items())),
-            "signed_frames":      self.signed_frames,
-            "unsigned_frames":    self.unsigned_frames,
-            "crc_valid_frames":   self.crc_valid_frames,
+            "packet_count": self.packet_count,
+            "parse_errors": self.parse_errors,
+            "unknown_msgs": self.unknown_msg_count,
+            "json_packets": self.json_packet_count,
+            "pipeline_sources": dict(sorted(self.pipeline_sources.items())),
+            "asset_count": len(self.assets),
+            "uav001_identified": UAV_SYS_ID in self.assets,
+            "msg_type_counts": dict(sorted(self.msg_type_counts.items())),
+            "signed_frames": self.signed_frames,
+            "unsigned_frames": self.unsigned_frames,
+            "crc_valid_frames": self.crc_valid_frames,
             "crc_invalid_frames": self.crc_invalid_frames,
             "crc_unknown_frames": self.crc_unknown_frames,
         }
 
-    def print_phase1_summary(self) -> None:
+    def print_summary(self) -> None:
         elapsed = time.time() - self.start_time
-        print(f"\n{'=' * 64}", flush=True)
-        print(f"[PASSIVE-MAVLINK-RECON] Phase 1 수집 완료", flush=True)
-        print(f"  경과 시간:    {elapsed:.1f}s", flush=True)
-        print(f"  수신 패킷:    {self.packet_count}개", flush=True)
-        print(f"  파싱 오류:    {self.parse_errors}개", flush=True)
-        print(f"  식별 자산:    {len(self.assets)}개", flush=True)
-        print(f"  UAV-001 식별: {'Y' if UAV_SYS_ID in self.assets else 'N'}", flush=True)
-        print(f"  HTTP 요청:    0  (Phase 1은 완전 수동)", flush=True)
-        print(f"  메시지 분포:  {dict(sorted(self.msg_type_counts.items()))}", flush=True)
-        print(f"  프레임 서명:  signed={self.signed_frames} unsigned={self.unsigned_frames} "
-              f"crc_invalid={self.crc_invalid_frames}", flush=True)
-        print(f"{'=' * 64}", flush=True)
-
+        print("\n" + "=" * 68, flush=True)
+        print("[PIPELINE-RECON] collection complete", flush=True)
+        print(f"  elapsed_s:       {elapsed:.1f}", flush=True)
+        print(f"  packets:         {self.packet_count}", flush=True)
+        print(f"  json_packets:    {self.json_packet_count}", flush=True)
+        print(f"  parse_errors:    {self.parse_errors}", flush=True)
+        print(f"  assets:          {len(self.assets)}", flush=True)
+        print(f"  UAV-001:         {'Y' if UAV_SYS_ID in self.assets else 'N'}", flush=True)
+        print(f"  msg_types:       {dict(sorted(self.msg_type_counts.items()))}", flush=True)
+        print(f"  sources:         {dict(sorted(self.pipeline_sources.items()))}", flush=True)
+        print("=" * 68, flush=True)
         for sid, rec in sorted(self.assets.items()):
-            cd      = confidence_details(rec)
-            armed   = "Y" if rec.get("is_armed") else "N"
-            label   = cd["label"].split("—")[0].strip()
-            in_oa   = rec.get("in_operational_area")
-            oa_str  = {True: "작전구역내", False: "작전구역외", None: "위치미확인"}.get(in_oa, "?")
+            cd = confidence_details(rec)
             print(
-                f"  [SYS_ID={sid}] {rec.get('mav_type','?')} "
-                f"상태={rec.get('system_status','?')} 무장={armed} "
-                f"신뢰도={cd['score']:.2f} [{label}] {oa_str}",
+                f"  [SYS_ID={sid}] platform={rec.get('platform_id', rec.get('mav_type', 'UNKNOWN'))} "
+                f"state={rec.get('system_status', 'UNKNOWN')} confidence={cd['score']:.2f}",
                 flush=True,
             )
             if "lat_deg" in rec:
                 print(
-                    f"    위치: {rec['lat_deg']}, {rec['lon_deg']} "
-                    f"고도={rec.get('alt_m')}m 속도={rec.get('ground_speed_mps')}m/s "
-                    f"방위={rec.get('heading_deg')}°",
+                    f"    pos={rec['lat_deg']},{rec['lon_deg']} alt={rec.get('alt_m')}m "
+                    f"speed={rec.get('ground_speed_mps')}m/s heading={rec.get('heading_deg')}",
                     flush=True,
                 )
-            if rec.get("battery_pct", -1) is not None and rec.get("battery_pct", -1) >= 0:
-                print(
-                    f"    배터리={rec['battery_pct']}% "
-                    f"패킷손실={rec.get('drop_rate_comm', 0) / 100:.1f}%",
-                    flush=True,
-                )
-            print(f"    패턴={classify_pattern(rec)}", flush=True)
 
 
-# ── 수집 루프 ─────────────────────────────────────────────────────────────
+def classify_pattern(rec: dict[str, Any]) -> str:
+    samples = rec.get("position_history", [])
+    speed = float(rec.get("ground_speed_mps") or 0.0)
+    if len(samples) >= 3:
+        alt_delta = samples[-1]["alt_m"] - samples[0]["alt_m"]
+        heading_values = [float(s.get("heading_deg") or 0.0) for s in samples[-5:]]
+        heading_span = max(heading_values) - min(heading_values) if heading_values else 0.0
+        if alt_delta < -50 and speed < 100:
+            return "DESCENT_OR_RTL"
+        if heading_span > 30:
+            return "PATROL_TURNING"
+    if speed < 10 and rec.get("position_samples", 0) >= 2:
+        return "LOITER_HOLDING"
+    if speed > 80:
+        in_oa = _is_in_operational_area(rec.get("lat_deg"), rec.get("lon_deg"))
+        return "PATROL_TRANSIT" if in_oa else "OUT_OF_AREA"
+    if rec.get("position_samples", 0):
+        return "TRANSIT"
+    return "INSUFFICIENT_DATA"
 
-def _handle_frame(report: IntelligenceReport, frame: ParsedMavlinkFrame, source_ip: str) -> None:
-    report.record_frame_security(frame)
-    report.record_msg_type(frame.message_name)
-    report.record_frame(frame, source_ip)
-    fields = frame.fields
-    sid    = frame.system_id
-    name   = frame.message_name
 
-    if name == "HEARTBEAT":
-        report.update_heartbeat(sid, fields)
-    elif name in {"GLOBAL_POSITION_INT", "UTM_GLOBAL_POSITION"}:
-        report.update_position(sid, fields, message_name=name)
-    elif name == "SYS_STATUS":
-        report.update_sys_status(sid, fields)
-    elif name == "COMMAND_ACK":
-        report.note_command_ack(sid, fields)
-    elif name == "COMMAND_LONG":
-        report.note_command_long(sid, fields)
-    elif name == "MISSION_CURRENT":
-        report.note_mission_current(sid, fields)
-    elif name == "MISSION_COUNT":
-        report.note_mission_count(sid, fields)
-    elif name == "MISSION_ACK":
-        report.note_mission_ack(sid, fields)
-    elif name == "MISSION_REQUEST_INT":
-        report.note_mission_request(sid, fields)
-    elif name == "MISSION_ITEM_INT":
-        report.note_mission_item(sid, fields)
-    else:
-        report.unknown_msg_count += 1
+def predict_position(rec: dict[str, Any], horizon_s: int) -> dict[str, Any] | None:
+    if rec.get("lat_deg") is None or rec.get("lon_deg") is None or not rec.get("velocity_mps"):
+        return None
+    lat = float(rec["lat_deg"])
+    lon = float(rec["lon_deg"])
+    alt = float(rec.get("alt_m") or 0.0)
+    vx_north, vy_east, vz_down = [float(v) for v in rec.get("velocity_mps", [0.0, 0.0, 0.0])]
+    pred_lat = lat + (vx_north * horizon_s) / 111_320.0
+    pred_lon = lon + (vy_east * horizon_s) / _meters_per_lon_degree(lat)
+    pred_alt = alt - vz_down * horizon_s
+    pattern = classify_pattern(rec)
+    penalty = 50.0 if pattern in {"PATROL_TURNING", "DESCENT_OR_RTL"} else 15.0
+    return {
+        "model": "constant_velocity_short_horizon",
+        "horizon_s": horizon_s,
+        "lat": round(pred_lat, 7),
+        "lon": round(pred_lon, 7),
+        "alt_m": round(pred_alt, 1),
+        "expected_error_m": round(penalty + 0.5 * horizon_s, 1),
+        "in_operational_area": _is_in_operational_area(round(pred_lat, 7), round(pred_lon, 7)),
+        "limits": "Use for controlled scenario selection only; revalidate before follow-on validation.",
+    }
+
+
+def follow_on_candidates(rec: dict[str, Any], score: float, baseline: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if score < CONF_MEDIUM:
+        return []
+    candidates: list[dict[str, Any]] = []
+    pattern = classify_pattern(rec)
+    if rec.get("lat_deg") is not None:
+        candidates.append({
+            "validation": "position-integrity-review",
+            "reason": "JSON telemetry exposes current WGS84 position and short-horizon prediction inputs.",
+            "pattern": pattern,
+        })
+    if rec.get("battery_pct") is not None:
+        candidates.append({
+            "validation": "health-state-review",
+            "reason": "Telemetry pipeline exposes fuel/battery and link-state fields.",
+            "battery_pct": rec.get("battery_pct"),
+        })
+    if baseline and baseline.get("api_available"):
+        candidates.append({
+            "validation": "failsafe-policy-review",
+            "reason": "Dashboard API exposes heartbeat, packet-loss, latency, and failsafe policy values.",
+            "hb_timeout_sec": baseline.get("hb_timeout_sec"),
+            "loss_critical_pct": baseline.get("loss_critical_pct"),
+        })
+    return candidates
+
+
+def timing_recommendations(rec: dict[str, Any], score: float) -> list[dict[str, str]]:
+    if score < CONF_MEDIUM:
+        return [{"status": "hold", "reason": "confidence below medium threshold; revalidation required"}]
+    pattern = classify_pattern(rec)
+    if pattern == "LOITER_HOLDING":
+        return [{"candidate": "link/failsafe validation", "reason": "asset appears stable enough for controlled comparison"}]
+    if pattern == "PATROL_TURNING":
+        return [{"candidate": "position-integrity validation", "reason": "turning phase is sensitive to trajectory interpretation"}]
+    if pattern == "PATROL_TRANSIT":
+        return [{"candidate": "pipeline exposure validation", "reason": "high-speed transit provides rich kinematic telemetry"}]
+    return [{"candidate": "short-window revalidation", "reason": f"pattern={pattern}"}]
+
+
+def blue_team_mapping() -> list[dict[str, Any]]:
+    return [
+        {
+            "layer": "GCS telemetry fan-out",
+            "expected_visibility": "high",
+            "reason": "GCS explicitly sends JSON telemetry to Dashboard, Collector, Router, and the lab Recon Tap.",
+            "recommended_control": "inventory all configured fan-out recipients and alert on unexpected telemetry taps.",
+        },
+        {
+            "layer": "Dashboard/GCS HTTP audit",
+            "expected_visibility": "medium",
+            "reason": "Phase 0 optionally calls /api/live and /api/failsafe; Phase 1 uses UDP JSON tap only.",
+            "recommended_control": "correlate API readers with UDP telemetry recipients.",
+        },
+        {
+            "layer": "Container runtime",
+            "expected_visibility": "medium-high",
+            "reason": "dah-recon container, command line, network membership, and output volume are visible.",
+            "recommended_control": "restrict cyber-lab profile containers and review ops_net membership.",
+        },
+        {
+            "layer": "Protocol monitor",
+            "expected_visibility": "high for exposure",
+            "reason": "MAVLink is converted to JSON at the companion/GCS boundary and propagated through the pipeline.",
+            "recommended_control": "treat telemetry fan-out as a data boundary; minimize fields and apply recipient allowlists.",
+        },
+    ]
+
+
+def ghost_sentinel_assessment() -> dict[str, Any]:
+    return {
+        "implemented": False,
+        "purpose": "Threat-model comparison only; this module uses no raw socket and no CAP_NET_RAW.",
+        "current_mode": "DAH_SMU JSON telemetry pipeline recon",
+        "defensive_question": "Can the environment detect an unexpected recipient in the GCS telemetry fan-out path?",
+    }
 
 
 def _open_socket(listen_host: str, listen_port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)  # Linux: 브로드캐스트 공유
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     except AttributeError:
         pass
     sock.bind((listen_host, listen_port))
@@ -863,81 +578,72 @@ def _collect(sock: socket.socket, report: IntelligenceReport, deadline: float, l
             print(f"  [{label}] parse error from {addr[0]} err={exc}", flush=True)
             continue
         for item in frames:
-            if not isinstance(item, ParsedMavlinkFrame):
+            if isinstance(item, dict):
+                report.json_packet_count += 1
+                report.record_json_telemetry(item, addr[0])
+                print(
+                    f"  [{label}] {addr[0]} json platform={item.get('platform_id', item.get('target_platform_id', '?'))} "
+                    f"source={item.get('source', 'unknown')}",
+                    flush=True,
+                )
                 continue
-            _handle_frame(report, item, addr[0])
-            print(
-                f"  [{label}] {addr[0]} sys={item.system_id} {item.message_name} "
-                f"signed={'Y' if item.signed else 'N'} crc={item.crc_valid}",
-                flush=True,
-            )
+            if isinstance(item, ParsedMavlinkFrame):
+                report.record_frame_security(item)
+                report.record_msg_type(item.message_name)
+                report.record_frame(item, addr[0])
+                print(
+                    f"  [{label}] {addr[0]} mavlink sys={item.system_id} msg={item.message_name} "
+                    f"signed={'Y' if item.signed else 'N'} crc={item.crc_valid}",
+                    flush=True,
+                )
 
 
-def _merge_better_observations(
-    primary: IntelligenceReport, secondary: IntelligenceReport
-) -> list[dict[str, Any]]:
+def _merge_better_observations(primary: IntelligenceReport, secondary: IntelligenceReport) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for sid, new_rec in secondary.assets.items():
-        old_rec   = primary.assets.get(sid)
+        old_rec = primary.assets.get(sid)
         if old_rec is None:
             primary.assets[sid] = new_rec
-            changes.append({"sys_id": sid, "action": "added", "new_score": _confidence_score(new_rec)})
+            changes.append({"sys_id": sid, "action": "added", "new_score": confidence_score(new_rec)})
             continue
-        old_score = _confidence_score(old_rec)
-        new_score = _confidence_score(new_rec)
+        old_score = confidence_score(old_rec)
+        new_score = confidence_score(new_rec)
         if new_score > old_score:
             old_rec.update(new_rec)
             changes.append({"sys_id": sid, "action": "improved", "old_score": old_score, "new_score": new_score})
         else:
             changes.append({"sys_id": sid, "action": "kept", "old_score": old_score, "new_score": new_score})
+    primary.json_packet_count += secondary.json_packet_count
+    for key, value in secondary.pipeline_sources.items():
+        primary.pipeline_sources[key] = primary.pipeline_sources.get(key, 0) + value
     return changes
 
 
-# ── Phase 5: Intel 저장 ───────────────────────────────────────────────────
-
-def _write_intel_handoff(path: str, uav_rec: dict[str, Any] | None,
-                          cd: dict[str, Any], candidates: list[dict[str, Any]],
-                          baseline: dict[str, Any] | None) -> None:
-    """다른 공격 에이전트가 읽을 수 있는 경량 핸드오프 파일 생성."""
-    handoff: dict[str, Any] = {
-        "generated_at":       time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "recon_source":       "passive_mavlink_recon + dashboard_api",
-        "target": {
-            "platform_id":   UAV_PLATFORM_ID,
-            "sys_id":        UAV_SYS_ID,
-            "host":          UAV_HOST,
-            "cmd_port":      UAV_CMD_PORT,
-        },
-        "confidence": {
-            "score":  cd.get("score"),
-            "label":  cd.get("label"),
-        },
+def _write_handoff(path: str, uav_rec: dict[str, Any] | None, cd: dict[str, Any], candidates: list[dict[str, Any]], baseline: dict[str, Any] | None) -> None:
+    handoff = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "recon_source": "gcs_json_fanout_tap",
+        "target": {"platform_id": UAV_PLATFORM_ID, "sys_id": UAV_SYS_ID},
+        "confidence": {"score": cd.get("score"), "label": cd.get("label")},
         "uav_state": {
-            "armed":         uav_rec.get("is_armed")       if uav_rec else None,
-            "alt_m":         uav_rec.get("alt_m")          if uav_rec else None,
-            "lat":           uav_rec.get("lat_deg")        if uav_rec else None,
-            "lon":           uav_rec.get("lon_deg")        if uav_rec else None,
-            "speed_mps":     uav_rec.get("ground_speed_mps") if uav_rec else None,
-            "heading_deg":   uav_rec.get("heading_deg")    if uav_rec else None,
-            "battery_pct":   uav_rec.get("battery_pct")   if uav_rec else None,
-            "pattern":       classify_pattern(uav_rec)     if uav_rec else None,
-            "in_oa":         uav_rec.get("in_operational_area") if uav_rec else None,
+            "armed": uav_rec.get("is_armed") if uav_rec else None,
+            "alt_m": uav_rec.get("alt_m") if uav_rec else None,
+            "lat": uav_rec.get("lat_deg") if uav_rec else None,
+            "lon": uav_rec.get("lon_deg") if uav_rec else None,
+            "speed_mps": uav_rec.get("ground_speed_mps") if uav_rec else None,
+            "heading_deg": uav_rec.get("heading_deg") if uav_rec else None,
+            "battery_pct": uav_rec.get("battery_pct") if uav_rec else None,
+            "pattern": classify_pattern(uav_rec) if uav_rec else None,
+            "in_oa": uav_rec.get("in_operational_area") if uav_rec else None,
         },
-        "api_baseline":       baseline,
-        "follow_on_agents":   candidates,
-        "executor_ready":     any(c["agent"] == "dah-executor" for c in candidates
-                                  if "LAND-INJECT" in c.get("action", "")),
-        "spoofer_ready":      any(c["agent"] == "dah-spoofer" for c in candidates),
-        "jammer_ready":       True,   # 항상 가능
-        "inducer_ready":      bool(baseline and baseline.get("api_available")),
+        "api_baseline": baseline,
+        "follow_on_validations": candidates,
+        "operator_approval_required": True,
     }
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(handoff, fh, ensure_ascii=False, indent=2, default=str)
-    print(f"[passive-mavlink-recon] 핸드오프 저장 → {path}", flush=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(handoff, handle, ensure_ascii=False, indent=2, default=str)
 
-
-# ── 메인 파이프라인 ────────────────────────────────────────────────────────
 
 def run(
     listen_host: str,
@@ -948,168 +654,112 @@ def run(
     output_path: str | None,
     skip_phase0: bool = False,
 ) -> dict[str, Any]:
-    print("[passive-mavlink-recon] Low-Privilege Sentinel 시작 (DAH_SMU)", flush=True)
-    print(f"  listen={listen_host}:{listen_port}  duration_s={duration_s}", flush=True)
-    print("  scope=DAH 2026 제어 적 에뮬레이션 — raw socket 없음, 패킷 주입 없음", flush=True)
-    _send_event("정찰 파이프라인 시작", detail=f"listen={listen_host}:{listen_port}")
+    print("[pipeline-recon] DAH_SMU telemetry pipeline recon starting", flush=True)
+    print(f"  listen={listen_host}:{listen_port} duration_s={duration_s}", flush=True)
+    print("  scope=controlled DAH emulation; no raw socket and no packet injection", flush=True)
+    _send_event("pipeline recon started", detail=f"listen={listen_host}:{listen_port}")
 
-    # ── Phase 0: API 사전 정찰 ────────────────────────────────────────────
     baseline: dict[str, Any] | None = None
     http_requests_total = 0
     if not skip_phase0:
-        print(f"\n[passive-mavlink-recon] Phase 0: API 사전 정찰", flush=True)
         baseline = phase0_api_recon()
-        http_requests_total = baseline.get("http_requests", 0)
+        http_requests_total = int(baseline.get("http_requests", 0))
+        print(f"[pipeline-recon] phase0 API requests={http_requests_total}", flush=True)
     else:
-        print(f"\n[passive-mavlink-recon] Phase 0: 생략 (--skip-phase0)", flush=True)
+        print("[pipeline-recon] phase0 skipped", flush=True)
 
-    # ── Phase 1: 수동 MAVLink 청취 ────────────────────────────────────────
-    print(f"\n[passive-mavlink-recon] Phase 1: UDP {listen_host}:{listen_port} 수동 청취 ({duration_s}s)", flush=True)
-    _send_event(f"Phase 1: 수동 청취 시작 UDP:{listen_port}", detail=f"duration={duration_s}s")
     report = IntelligenceReport()
-    sock   = _open_socket(listen_host, listen_port)
+    sock = _open_socket(listen_host, listen_port)
     _collect(sock, report, time.time() + duration_s, "phase1")
     sock.close()
-    report.print_phase1_summary()
-    _send_event(
-        f"Phase 1 완료 — {len(report.assets)}개 자산 식별",
-        level="warn" if report.assets else "info",
-        detail=f"packets={report.packet_count} UAV001={'Y' if UAV_SYS_ID in report.assets else 'N'}",
-        status="OK",
-    )
+    report.print_summary()
 
-    # ── Phase 2: 신뢰도 채점 ─────────────────────────────────────────────
-    print(f"\n[passive-mavlink-recon] Phase 2: 신뢰도 채점", flush=True)
-    for sid, rec in sorted(report.assets.items()):
-        cd = confidence_details(rec)
-        label_short = cd["label"].split("—")[0].strip()
-        print(f"  sys={sid:3d}  score={cd['score']:.2f}  {label_short}", flush=True)
-        if sid == UAV_SYS_ID and cd["score"] >= CONF_HIGH:
-            _send_event(
-                f"UAV-001 HIGH 신뢰도 확보",
-                level="warn",
-                detail=f"score={cd['score']:.2f} armed={'Y' if rec.get('is_armed') else 'N'} "
-                       f"alt={rec.get('alt_m')}m pattern={classify_pattern(rec)}",
-                status="ALERT",
-            )
-
-    # ── Phase 3: 단기 재검증 (LOW 자산) ──────────────────────────────────
     revalidation_changes: list[dict[str, Any]] = []
-    needs_reval = [sid for sid, rec in report.assets.items() if _confidence_score(rec) < CONF_HIGH]
+    needs_reval = [sid for sid, rec in report.assets.items() if confidence_score(rec) < CONF_HIGH]
     if revalidate_s > 0 and needs_reval:
-        print(f"\n[passive-mavlink-recon] Phase 3: 재검증 sys_ids={needs_reval}", flush=True)
+        print(f"[pipeline-recon] revalidating sys_ids={needs_reval}", flush=True)
         second = IntelligenceReport()
-        sock2  = _open_socket(listen_host, listen_port)
+        sock2 = _open_socket(listen_host, listen_port)
         _collect(sock2, second, time.time() + revalidate_s, "revalidate")
         sock2.close()
         revalidation_changes = _merge_better_observations(report, second)
-        for change in revalidation_changes:
-            print(f"  재검증 {change}", flush=True)
     elif revalidate_s > 0:
-        print(f"\n[passive-mavlink-recon] Phase 3: 전 자산 HIGH — 재검증 생략", flush=True)
+        print("[pipeline-recon] revalidation skipped: all assets high confidence", flush=True)
 
-    # ── Phase 4: 후속 에이전트 매핑 ──────────────────────────────────────
-    print(f"\n[passive-mavlink-recon] Phase 4: DAH_SMU 후속 에이전트 매핑", flush=True)
-    uav_rec    = report.assets.get(UAV_SYS_ID)
-    uav_cd     = confidence_details(uav_rec) if uav_rec else {"score": 0.0, "label": "NO_DATA", "factors": {}}
-    candidates = dah_smu_follow_on(uav_rec or {}, float(uav_cd["score"]), baseline)
-
-    for c in candidates:
-        print(f"  [{c['agent']}] {c['action']}: {c['reason']}", flush=True)
-        print(f"    타이밍: {c.get('timing', '-')}", flush=True)
-
-    all_agents = [c["agent"] for c in candidates]
-    if all_agents:
-        _send_event(
-            "후속 에이전트 매핑 완료",
-            level="warn",
-            detail=" | ".join(f"{c['agent']}:{c['action']}" for c in candidates),
-            status="ALERT",
-        )
-
-    timing_recs = timing_recommendations(uav_rec or {}, float(uav_cd["score"]))
-    print(f"\n[passive-mavlink-recon] 타이밍 권고: {timing_recs}", flush=True)
-
-    # 위치 예측
+    uav_rec = report.assets.get(UAV_SYS_ID)
+    uav_cd = confidence_details(uav_rec) if uav_rec else {"score": 0.0, "label": "NO_DATA", "factors": {}}
     prediction = predict_position(uav_rec or {}, prediction_horizon_s) if uav_rec else None
-    if prediction:
-        print(
-            f"\n[passive-mavlink-recon] {prediction_horizon_s}s 위치 예측: "
-            f"lat={prediction['lat']} lon={prediction['lon']} alt={prediction['alt_m']}m "
-            f"오차={prediction['expected_error_m']}m in_oa={prediction.get('in_operational_area')}",
-            flush=True,
-        )
+    candidates = follow_on_candidates(uav_rec or {}, float(uav_cd["score"]), baseline)
+    timing_recs = timing_recommendations(uav_rec or {}, float(uav_cd["score"]))
 
-    # ── Phase 5: JSON 저장 ────────────────────────────────────────────────
-    intel: dict[str, Any] = {
+    intel = {
         "meta": {
-            "attack":               "passive_mavlink_recon",
-            "scenario":             "Low-Privilege Sentinel (DAH_SMU)",
-            "threat_model":         "low-privilege observer on dah-net MAVLink broadcast segment",
-            "duration_s":           duration_s,
-            "revalidate_s":         revalidate_s,
+            "attack": "pipeline_recon",
+            "scenario": "Low-Privilege Sentinel (DAH_SMU JSON telemetry pipeline)",
+            "threat_model": "low-privilege observer explicitly attached to GCS telemetry fan-out in the DAH_SMU lab",
+            "duration_s": duration_s,
+            "revalidate_s": revalidate_s,
             "prediction_horizon_s": prediction_horizon_s,
-            "http_requests":        http_requests_total,
-            "gcs_audit_trace":      http_requests_total > 0,
-            "network_ids_visible":  True,
-            "raw_socket_used":      False,
+            "http_requests": http_requests_total,
+            "gcs_audit_trace": http_requests_total > 0,
+            "network_ids_visible": True,
+            "raw_socket_used": False,
             "cap_net_raw_required": False,
-            "dah_smu_target":       UAV_PLATFORM_ID,
+            "listen_port": listen_port,
+            "dah_smu_target": UAV_PLATFORM_ID,
         },
-        "phase0_api_baseline":    baseline,
-        "collection_summary":     report.summary(),
-        "assets":                 report.sanitized_assets(),
+        "phase0_api_baseline": baseline,
+        "collection_summary": report.summary(),
+        "assets": report.sanitized_assets(),
         "uav001": {
-            "sys_id":    UAV_SYS_ID,
+            "sys_id": UAV_SYS_ID,
             "confidence": uav_cd,
-            "state":     {
-                k: uav_rec.get(k) for k in [
-                    "mav_type", "system_status", "is_armed", "is_guided",
-                    "lat_deg", "lon_deg", "alt_m", "ground_speed_mps",
-                    "heading_deg", "battery_pct", "drop_rate_comm",
-                    "mission_seq", "in_operational_area",
+            "state": {
+                key: uav_rec.get(key) for key in [
+                    "platform_id", "mav_type", "system_status", "is_armed", "is_guided",
+                    "lat_deg", "lon_deg", "alt_m", "ground_speed_mps", "heading_deg",
+                    "battery_pct", "drop_rate_comm", "pipeline_seq", "in_operational_area",
                 ]
             } if uav_rec else None,
-            "pattern":         classify_pattern(uav_rec) if uav_rec else None,
-            "prediction":      prediction,
-            "timing_recs":     timing_recs,
+            "pattern": classify_pattern(uav_rec) if uav_rec else None,
+            "prediction": prediction,
+            "timing_recs": timing_recs,
         },
-        "follow_on_agents":   candidates,
-        "revalidation":       revalidation_changes,
-        "blue_team_mapping":  blue_team_mapping(),
-        "ghost_sentinel":     ghost_sentinel_assessment(),
+        "follow_on_validations": candidates,
+        "revalidation": revalidation_changes,
+        "blue_team_mapping": blue_team_mapping(),
+        "ghost_sentinel": ghost_sentinel_assessment(),
     }
+
+    print("[pipeline-recon] follow-on validation summary", flush=True)
+    print(json.dumps({
+        "uav001_confidence": uav_cd.get("score"),
+        "pattern": intel["uav001"]["pattern"],
+        "candidates": candidates,
+    }, ensure_ascii=False, indent=2), flush=True)
 
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as fh:
-            json.dump(intel, fh, ensure_ascii=False, indent=2, default=str)
-        print(f"\n[passive-mavlink-recon] Phase 5: intel 저장 → {output_path}", flush=True)
-
-        # intel_handoff.json (후속 에이전트용 경량 파일)
-        handoff_path = os.path.join(
-            os.path.dirname(output_path), "intel_handoff.json"
-        )
-        _write_intel_handoff(handoff_path, uav_rec, uav_cd, candidates, baseline)
-        _send_event("인텔 저장 완료", detail=f"{output_path} + {handoff_path}", status="OK")
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(intel, handle, ensure_ascii=False, indent=2, default=str)
+        handoff_path = os.path.join(os.path.dirname(output_path), "intel_handoff.json")
+        _write_handoff(handoff_path, uav_rec, uav_cd, candidates, baseline)
+        print(f"[pipeline-recon] result saved: {output_path}", flush=True)
+        print(f"[pipeline-recon] handoff saved: {handoff_path}", flush=True)
     else:
-        print(json.dumps(intel, ensure_ascii=False, indent=2, default=str))
-
+        print(json.dumps(intel, ensure_ascii=False, indent=2, default=str), flush=True)
     return intel
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Passive MAVLink Recon — Low-Privilege Sentinel (DAH_SMU)"
-    )
-    parser.add_argument("--listen-host",           default=LISTEN_HOST)
-    parser.add_argument("--listen-port",   type=int, default=LISTEN_PORT)
-    parser.add_argument("--duration-s",    type=int, default=120)
-    parser.add_argument("--revalidate-s",  type=int, default=20)
+    parser = argparse.ArgumentParser(description="DAH_SMU telemetry pipeline recon")
+    parser.add_argument("--listen-host", default=LISTEN_HOST)
+    parser.add_argument("--listen-port", type=int, default=LISTEN_PORT)
+    parser.add_argument("--duration-s", type=int, default=120)
+    parser.add_argument("--revalidate-s", type=int, default=20)
     parser.add_argument("--prediction-horizon-s", type=int, default=60)
-    parser.add_argument("--output",               default="/app/output/passive_mavlink_intel.json")
-    parser.add_argument("--skip-phase0",   action="store_true",
-                        help="Dashboard API 사전 정찰 생략 (완전 수동 모드)")
+    parser.add_argument("--output", default="/app/output/passive_mavlink_intel.json")
+    parser.add_argument("--skip-phase0", action="store_true")
     args = parser.parse_args(argv)
     run(
         listen_host=args.listen_host,
