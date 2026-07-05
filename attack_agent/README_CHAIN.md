@@ -73,7 +73,7 @@ python -m attack_agent.kill_chain --stage all --objective PROTOCOL_INTEGRITY_TES
 ## 실제 이벤트 전송 실행 방법
 
 이 프로젝트에서 말하는 "실제 이벤트 전송"은 실제 드론, 실제 RF, 외부 네트워크, raw packet 공격을 의미하지 않습니다.  
-`DAH_SMU` Docker 내부 테스트베드 안에서만 `Executor -> Safe Follow-up Module -> 기존 C2 보고 경로 -> Dashboard/Upper C2`로 시뮬레이션 이벤트를 전달하는 것을 의미합니다.
+`DAH_SMU` Docker 내부 테스트베드 안에서만 `FollowUpAttackAgent -> Adapter -> Safe Follow-up Module -> Dashboard/C2 evidence`로 시뮬레이션 이벤트를 전달하는 것을 의미합니다.
 
 체인 코드는 실행 위치를 자동으로 구분합니다.
 
@@ -220,13 +220,12 @@ output\stage_3_execution_report.json
 
 | 항목 | 의미 |
 |---|---|
-| source recon file | 어떤 정찰 결과에서 시작했는지 |
-| source initial access finding ID | 어떤 Initial Access Finding이 후속 실행으로 이어졌는지 |
-| selected follow-up module | Planner가 선택한 후속 모듈 |
-| before summary | 실행 전 Dashboard/C2 요약 |
-| after summary | 실행 후 Dashboard/C2 요약 |
-| dashboard recommendation change | 실행 전후 추천/상태 변화 |
-| simulated alert evidence | 모듈이 생성한 안전 시뮬레이션 evidence |
+| `input_initial_access_intel` | 어떤 2단계 분석 결과에서 시작했는지 |
+| `plan_summary.steps` | Planner가 선택한 후속 모듈과 실행 파라미터 |
+| `before_summary` | 실행 전 Dashboard `/api/live` 요약 |
+| `after_summary` | 실행 후 Dashboard `/api/live` 요약 |
+| `execution_results` | Adapter 실행 결과와 안전 alert evidence |
+| `verification.recommendation_change` | 실행 전후 `mission_state.phase` 변화 |
 
 대시보드/API에서도 변화를 확인할 수 있습니다.
 
