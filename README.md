@@ -345,15 +345,16 @@ python -m attack_agent.kill_chain --stage recon --skip-recon-collection
 
 ```text
 1. ReconAgent
-   - 실행: passive MAVLink mirror 수집, Dashboard/Failsafe API 사전 정찰, 후속 모듈 후보 매핑
+   - 실행: passive MAVLink mirror 수집, Dashboard/Failsafe API 사전 정찰, 정찰 태그/분석 힌트 생성
    - 입력/중간 산출물: output/intel_handoff.json, output/passive_mavlink_intel.json
    - 출력: output/stage_1_recon.json
    - 역할: 모든 정찰 이벤트 실행 후 산출물을 표준 IntelDocument로 정규화
+   - 주의: 실행 가능한 후속공격 후보는 만들지 않음
 
 2. InitialAccessAgent
    - 입력: output/stage_1_recon.json
    - 출력: output/stage_2_initial_access.json, output/stage_2_attack_graph.json
-   - 역할: API surface, 자산, 경로, GCS 모델, 후속공격 후보 생성
+   - 역할: 정찰 태그와 API surface를 근거로 자산, 경로, GCS 모델, 후속공격 후보 생성
 
 3. FollowUpAttackAgent
    - 입력: output/stage_2_initial_access.json

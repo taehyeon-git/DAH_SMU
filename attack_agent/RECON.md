@@ -8,7 +8,7 @@
 
 ## 1. 개요
 
-**Passive MAVLink Recon**은 dah-net(`172.31.50.0/24`) 안에서 Companion Computer가 복제한 MAVLink mirror를 수동으로 청취하여, 후속 안전 시뮬레이션 모듈의 판단 근거를 구조화하는 인텔리전스 수집 모듈이다.
+**Passive MAVLink Recon**은 dah-net(`172.31.50.0/24`) 안에서 Companion Computer가 복제한 MAVLink mirror를 수동으로 청취하여, InitialAccessAgent가 사용할 정찰 신호를 구조화하는 인텔리전스 수집 모듈이다.
 
 ### 핵심 특성
 
@@ -53,7 +53,7 @@
 
 ```
 Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
-API 정찰    UDP 청취   신뢰도 채점  재검증(LOW)  후속 모듈 매핑  결과 저장
+API 정찰    UDP 청취   신뢰도 채점  재검증(LOW)  정찰 태그 생성  결과 저장
 (~5s)      (기본 30s) (즉시)       (20s/생략)   (즉시)        (즉시)
 ```
 
@@ -125,7 +125,7 @@ GCS HTTP 요청 없음 — 감사 로그 흔적 없음.
 **임계값:**
 
 ```
-HIGH   ≥ 0.80  → 후속 모듈 후보 생성 가능
+HIGH   ≥ 0.80  → 정찰 신뢰도 높음
 MEDIUM  0.50~0.79 → 재검증 권고
 LOW    < 0.50  → 지연/스푸핑/불완전 관측 가능성
 ```
@@ -156,34 +156,32 @@ LOW 자산 있음 → 추가 20s 청취 → score 개선 시 덮어쓰기
 
 ---
 
-### Phase 4 — DAH_SMU 후속 모듈 매핑
+### Phase 4 — 정찰 태그 / 분석 힌트 생성
 
-UAV-001 상태와 신뢰도를 기반으로 현재 구현된 안전 후속 모듈 권고를 생성한다.
+ReconAgent는 이 단계에서 실행 가능한 후속 모듈을 고르지 않는다.  
+대신 InitialAccessAgent가 판단할 수 있도록 `recon_tags`와 `analysis_hints`를 만든다.
 
-#### JammerAdapter / `dah-jammer` (`EW_LINK_DEGRADATION_SIM`)
-```
-조건: 링크 상태 모니터링 가능
-타이밍: PATROL_TRANSIT 중 실행 시 대시보드 링크저하 변화 관측 용이
-파라미터: router_host=dah-tactical-router  jam_port=14590
-          channels=[VHF, UHF, HF]  duration=14s
-```
+**생성되는 대표 태그:**
 
-#### TamperAdapter / `tamper` (`PROTOCOL_FRAME_INTEGRITY_SIM`)
-```
-조건: Phase 0 API 정찰 성공 또는 parser 테스트 목적
-타이밍: 즉시 가능
-파라미터: mutation=FRAME_CRC_BREAK, protocol=MAVLink-like
-```
+| 태그 | 의미 | 다음 단계 활용 |
+|---|---|---|
+| `CONFIDENCE_HIGH`, `CONFIDENCE_MEDIUM`, `CONFIDENCE_LOW` | 정찰 신뢰도 | 후보 생성 여부와 confidence 계산 |
+| `PATTERN_*` | 비행 패턴 분류 결과 | 공격 그래프 설명과 타이밍 근거 |
+| `API_BASELINE_AVAILABLE` | `/api/live`, `/api/failsafe` 기준값 확보 | 프로토콜/대시보드 경고 경로 검증 근거 |
+| `LINK_METRICS_AVAILABLE` | TICN 손실률/링크 품질 관측 | `EW_LINK_DEGRADATION_SIM` 후보 생성 근거 |
+| `PROTOCOL_FRAME_METADATA_AVAILABLE` | CRC/서명/프레임 메타데이터 관측 | `PROTOCOL_FRAME_INTEGRITY_SIM` 후보 생성 근거 |
+| `FAILSAFE_POLICY_OBSERVED` | fail-safe 정책 확인 | fail-safe 결과 해석 근거 |
+
+후속 모듈 후보 생성은 다음 단계인 `InitialAccessAgent`가 담당한다.
 
 **행동 패턴 분류 (DAH_SMU 맞춤):**
 
-현재 구현에서 행동 패턴은 "어떤 모듈을 실행할지"를 단독 결정하지 않는다.  
-`score >= MEDIUM`이면 `EW_LINK_DEGRADATION_SIM` 후보가 생성되고, Phase 0 API baseline이 있으면 `PROTOCOL_FRAME_INTEGRITY_SIM` 후보도 생성된다.  
-패턴은 주로 `EW_LINK_DEGRADATION_SIM`의 타이밍/설명 문구를 보강하는 근거로 사용된다.
+현재 구현에서 행동 패턴은 "어떤 모듈을 실행할지"를 ReconAgent가 단독 결정하지 않는다.  
+패턴은 `PATTERN_*` 태그와 `analysis_hints`로 저장되고, InitialAccessAgent가 API surface/GCS 모델과 함께 해석한다.
 
 | 패턴 | 조건 | 현재 활용 |
 |---|---|---|
-| `PATROL_TRANSIT` | 속도 > 80m/s + 작전구역 내 | 링크 저하 시뮬레이션 타이밍이 좋다는 근거 |
+| `PATROL_TRANSIT` | 속도 > 80m/s + 작전구역 내 | 실행 전후 상태 변화 비교에 유리하다는 근거 |
 | `PATROL_TURNING` | 방위각 변화 > 30° | 비행 패턴 설명/재검증 근거 |
 | `LOITER_HOLDING` | 속도 < 10m/s + 위치 샘플 있음 | 즉각 반응이 약할 수 있다는 타이밍 근거 |
 | `DESCENT_OR_RTL` | 고도 변화 < -50m + 속도 < 100m/s | 이미 복귀/하강 중일 가능성 설명 |
@@ -217,7 +215,7 @@ output/
     "host": "172.31.50.10",
     "cmd_port": 14551
   },
-  "confidence": { "score": 1.00, "label": "HIGH — 후속 모듈 후보 생성 가능" },
+  "confidence": { "score": 1.00, "label": "HIGH — 정찰 신뢰도 높음" },
   "uav_state": {
     "armed": true,
     "alt_m": 3500,
@@ -226,12 +224,24 @@ output/
     "pattern": "PATROL_TRANSIT",
     "in_oa": true
   },
-  "link_degradation_ready": true,
-  "protocol_integrity_ready": true,
-  "follow_on_agents": [
-    { "agent": "dah-jammer", "action": "EW_LINK_DEGRADATION_SIM", "params": {...} },
-    { "agent": "tamper",     "action": "PROTOCOL_FRAME_INTEGRITY_SIM", "params": {...} }
-  ]
+  "recon_tags": {
+    "tags": [
+      "CONFIDENCE_HIGH",
+      "PATTERN_PATROL_TRANSIT",
+      "API_BASELINE_AVAILABLE",
+      "LINK_METRICS_AVAILABLE",
+      "FAILSAFE_POLICY_OBSERVED"
+    ],
+    "selection_owner": "InitialAccessAgent",
+    "module_candidates_generated": false
+  },
+  "analysis_hints": [
+    {
+      "signal": "PATROL_TRANSIT_HIGH_ALT",
+      "reason": "순항 중 + 고도 3500m — 실행 전후 상태 변화 비교에 유리"
+    }
+  ],
+  "next_stage": "InitialAccessAgent"
 }
 ```
 
@@ -348,8 +358,8 @@ uav001
   ├── state                 — 최신 UAV 상태값
   ├── pattern               — 행동 패턴 (PATROL_TRANSIT 등)
   ├── prediction            — 위치 예측 (constant_velocity 모델)
-  └── timing_recs           — 후속 모듈 타이밍 권고
-follow_on_agents           — Phase 4 후속 모듈 매핑 (legacy key, 파라미터 포함)
+  └── timing_recs           — InitialAccessAgent가 참고할 분석 힌트
+recon_tags                 — Phase 4 정찰 태그/분석 신호
 revalidation               — Phase 3 재검증 변경 이력
 blue_team_mapping          — 탐지 계층별 가시성 및 권고 통제
 ghost_sentinel             — 고권한 수동 정찰 위협모델 비교
@@ -357,8 +367,8 @@ ghost_sentinel             — 고권한 수동 정찰 위협모델 비교
 
 ### intel_handoff.json
 
-후속 체인이 파싱하기 위한 경량 파일.  
-현재 표준 체인에서는 `ReconAgent`가 이 파일을 `stage_1_recon.json`으로 정규화한 뒤 `InitialAccessAgent`가 후속 모듈 후보를 다시 계산한다.
+InitialAccessAgent가 파싱하기 위한 경량 파일.  
+현재 표준 체인에서는 `ReconAgent`가 이 파일을 `stage_1_recon.json`으로 정규화하고, `InitialAccessAgent`가 `recon_tags`와 API surface를 근거로 후속 모듈 후보를 생성한다.
 
 ---
 
@@ -368,11 +378,12 @@ ghost_sentinel             — 고권한 수동 정찰 위협모델 비교
 ReconAgent
   ├── Phase 0: /api/live + /api/failsafe
   ├── Phase 1: passive MAVLink mirror 수집
+  ├── Phase 4: recon_tags / analysis_hints 생성
   └── stage_1_recon.json
         ↓
 InitialAccessAgent
   ├── API surface / asset / edge / GCS model 생성
-  └── 후속 모듈 후보 생성
+  └── recon_tags 기반 후속 모듈 후보 생성
         ├── EW_LINK_DEGRADATION_SIM
         └── PROTOCOL_FRAME_INTEGRITY_SIM
         ↓
@@ -411,7 +422,7 @@ recon.py는 `dah-dashboard:14571`(UDP)으로 이벤트를 실시간 전송한다
 | Phase 0 완료 | warn | "Phase 0 완료 — 운용 상태 및 Fail-safe 정책 수집" |
 | Phase 1 완료 | warn/info | "Phase 1 완료 — N개 자산 식별" |
 | HIGH 신뢰도 확보 | warn | "UAV-001 HIGH 신뢰도 확보" |
-| 후속 모듈 매핑 | warn | "후속 에이전트 매핑 완료" |
+| 정찰 신호 정규화 | info | "정찰 신호 정규화 완료" |
 | 인텔 저장 완료 | info | "인텔 저장 완료" |
 
 ---

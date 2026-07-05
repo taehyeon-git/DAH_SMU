@@ -83,7 +83,7 @@ class ReconAgent:
             "output": output_path,
             "collection": collection_report,
             "asset_count": len(doc.assets),
-            "candidate_action_count": len(doc.candidate_actions),
+            "observation_count": len(doc.observations),
             "simulated_only": True,
             "scope": doc.safety.get("scope"),
         }

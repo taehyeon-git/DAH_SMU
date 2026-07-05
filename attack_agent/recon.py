@@ -6,8 +6,7 @@
   Phase 1: UDP 14550 수동 MAVLink 청취  (120s, dah-net 브로드캐스트)
   Phase 2: 6-팩터 신뢰도 채점
   Phase 3: LOW 자산 단기 재검증  (20s)
-  Phase 4: DAH_SMU 후속 안전 모듈 매핑
-             EW_LINK_DEGRADATION_SIM / PROTOCOL_FRAME_INTEGRITY_SIM
+  Phase 4: InitialAccessAgent 전달용 정찰 태그/분석 힌트 생성
   Phase 5: JSON 저장  (intel.json + intel_handoff.json)
 
 보안 제약: raw socket 없음, 패킷 주입 없음, 실제 군 장비 미연결.
@@ -70,10 +69,6 @@ OA_LAT_MIN = 37.850
 OA_LAT_MAX = 37.960
 OA_LON_MIN = 126.790
 OA_LON_MAX = 126.920
-
-# 후속 안전 모듈 대상 (dah-net / ops_net 주소)
-AGENT_JAMMER_HOST   = "dah-tactical-router"
-AGENT_JAM_PORT      = 14590
 
 # 신뢰도 임계값
 CONF_HIGH   = 0.80
@@ -294,7 +289,7 @@ def _confidence_score(rec: dict[str, Any]) -> float:
 
 def _confidence_label(score: float) -> str:
     if score >= CONF_HIGH:
-        return "HIGH — 후속 에이전트 실행 가능"
+        return "HIGH — 정찰 신뢰도 높음"
     if score >= CONF_MEDIUM:
         return "MEDIUM — 재검증 권고"
     return "LOW — 지연/스푸핑/불완전 관측"
@@ -359,65 +354,61 @@ def predict_position(rec: dict[str, Any], horizon_s: int) -> dict[str, Any] | No
         "alt_m":              round(pred_alt, 1),
         "expected_error_m":   round(base_err, 1),
         "in_operational_area": in_oa,
-        "limits":             "단기 시나리오 선택 전용; 후속 에이전트 실행 전 재검증 필수",
+        "limits":             "단기 상황 인식 전용; InitialAccessAgent 판단 전 재검증 권고",
     }
 
 
-# ── Phase 4: DAH_SMU 후속 에이전트 매핑 ─────────────────────────────────
+# ── Phase 4: InitialAccessAgent 전달용 정찰 태그 생성 ───────────────────
 
-def dah_smu_follow_on(
+def build_recon_tags(
     rec: dict[str, Any],
     score: float,
     baseline: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """
-    신뢰도와 UAV 상태를 기반으로 DAH_SMU 안전 후속 모듈 목록을 반환.
-    각 후보는 agent, action, reason, params 필드를 포함.
-    """
-    if score < CONF_MEDIUM:
-        return []
+) -> dict[str, Any]:
+    """정찰 결과를 공격 후보가 아닌 분석 신호로 정규화한다."""
+    pattern = classify_pattern(rec)
+    api_available = bool(baseline and baseline.get("api_available"))
+    link_metrics_available = bool(
+        baseline
+        and (
+            baseline.get("ticn_loss_pct") is not None
+            or baseline.get("ticn_link_quality") is not None
+        )
+    )
+    protocol_metadata_available = bool(
+        rec.get("crc_valid_frames")
+        or rec.get("crc_invalid_frames")
+        or rec.get("crc_unknown_frames")
+        or rec.get("signed_frames")
+        or rec.get("unsigned_frames")
+    )
+    tags: list[str] = []
+    tags.append("CONFIDENCE_HIGH" if score >= CONF_HIGH else "CONFIDENCE_MEDIUM" if score >= CONF_MEDIUM else "CONFIDENCE_LOW")
+    tags.append(f"PATTERN_{pattern}")
+    if api_available:
+        tags.append("API_BASELINE_AVAILABLE")
+    if link_metrics_available:
+        tags.append("LINK_METRICS_AVAILABLE")
+    if protocol_metadata_available:
+        tags.append("PROTOCOL_FRAME_METADATA_AVAILABLE")
+    if baseline and baseline.get("failsafe_action"):
+        tags.append("FAILSAFE_POLICY_OBSERVED")
+    if rec.get("in_operational_area") is False:
+        tags.append("OUT_OF_OPERATIONAL_AREA")
 
-    candidates: list[dict[str, Any]] = []
-    pattern  = classify_pattern(rec)
-
-    # ── dah-jammer: TMMR 전파 재밍 ───────────────────────────────────────
-    # 조건: 링크 상태 모니터링 완료 + 비행 중 (패턴이 LOITER가 아닌 경우 효과적)
-    drop_rate = float(rec.get("drop_rate_comm") or 0.0)
-    jam_optimal = pattern in {"PATROL_TRANSIT", "PATROL_TURNING", "MISSION_PROGRESS", "TRANSIT"}
-    candidates.append({
-        "agent":  "dah-jammer",
-        "action": "EW_LINK_DEGRADATION_SIM",
-        "reason": (
-            f"링크 모니터링 완료 (drop_rate={drop_rate:.0f}) — "
-            f"{'비행 중 주입 효과 최대' if jam_optimal else 'LOITER 중 주입 — 즉각 반응 약함'}"
-        ),
-        "timing": "즉시 가능" if jam_optimal else "비행 복귀 후 주입 권장",
-        "params": {
-            "router_host": AGENT_JAMMER_HOST,
-            "jam_port":    AGENT_JAM_PORT,
-            "channels":    ["VHF", "UHF", "HF"],
-            "duration_s":  14,
-        },
-    })
-
-    # ── tamper: 합성 프로토콜 프레임 무결성 테스트 ───────────────────────
-    # 조건: 위치 또는 API baseline 중 하나라도 확보된 경우
-    if baseline and baseline.get("api_available"):
-        candidates.append({
-            "agent":  "tamper",
-            "action": "PROTOCOL_FRAME_INTEGRITY_SIM",
-            "reason": "Dashboard/Failsafe API baseline 확보 — 합성 프레임 무결성 경고 경로 검증 가능",
-            "timing": "즉시 가능 — 실제 MAVLink/UDP 공격 트래픽 없이 로컬 합성 프레임만 사용",
-            "params": {
-                "dst_asset": "local-parser",
-                "dst_host": "localhost",
-                "dst_port": 14550,
-                "mutation": "FRAME_CRC_BREAK",
-                "protocol": "MAVLink-like",
-            },
-        })
-
-    return candidates
+    return {
+        "tags": tags,
+        "pattern": pattern,
+        "confidence_score": score,
+        "confidence_ready": score >= CONF_MEDIUM,
+        "api_baseline_available": api_available,
+        "link_metrics_available": link_metrics_available,
+        "protocol_metadata_available": protocol_metadata_available,
+        "failsafe_policy_observed": bool(baseline and baseline.get("failsafe_action")),
+        "selection_owner": "InitialAccessAgent",
+        "module_candidates_generated": False,
+        "analysis_hints": timing_recommendations(rec, score),
+    }
 
 
 def timing_recommendations(rec: dict[str, Any], score: float) -> list[dict[str, str]]:
@@ -428,18 +419,18 @@ def timing_recommendations(rec: dict[str, Any], score: float) -> list[dict[str, 
     armed   = bool(rec.get("is_armed"))
 
     if pattern == "LOITER_HOLDING":
-        return [{"candidate": "dah-jammer", "reason": "LOITER 상태 — 링크 저하 시뮬레이션으로 fail-safe 표시 확인"}]
+        return [{"signal": "LOITER_HOLDING", "reason": "이미 대기 상태에 가까워 실행 전후 위치 변화 검증이 중요"}]
     if pattern == "PATROL_TURNING":
-        return [{"candidate": "tamper", "reason": "선회 기동 중 합성 프레임 무결성 테스트로 parser resilience 확인"}]
+        return [{"signal": "PATROL_TURNING", "reason": "선회 중이라 위치/방위각 기반 관측 신뢰도를 재확인할 필요"}]
     if pattern == "DESCENT_OR_RTL":
-        return [{"candidate": "dah-jammer", "reason": "귀환 중 — 링크 두절 시 LOITER 지속 또는 방어 회피"}]
+        return [{"signal": "DESCENT_OR_RTL", "reason": "이미 귀환/하강 중일 수 있어 후속 분석에서 원인 혼동 주의"}]
     if pattern == "PATROL_TRANSIT" and armed and alt_m > 1000:
-        return [{"candidate": "dah-jammer", "reason": f"순항 중 + 고도 {alt_m:.0f}m — 링크 저하 시뮬레이션 효과 관측 용이"}]
+        return [{"signal": "PATROL_TRANSIT_HIGH_ALT", "reason": f"순항 중 + 고도 {alt_m:.0f}m — 실행 전후 상태 변화 비교에 유리"}]
     if pattern == "OUT_OF_AREA":
-        return [{"candidate": "tamper", "reason": "작전구역 이탈 감지 — 합성 무결성 경고로 C2 권고 변화 확인"}]
+        return [{"signal": "OUT_OF_AREA", "reason": "작전구역 이탈 감지 — 위치 데이터 재검증 필요"}]
     if pattern == "MISSION_UPLOAD_ACTIVITY":
-        return [{"candidate": "dah-jammer", "reason": "미션 업로드 중 — 링크 저하 시뮬레이션으로 C2 반응 확인"}]
-    return [{"candidate": "dah-jammer", "reason": f"패턴={pattern} — 재밍으로 상태 변화 관측 후 재분석"}]
+        return [{"signal": "MISSION_UPLOAD_ACTIVITY", "reason": "미션 업로드 활동 감지 — 통신 경로 분석 근거"}]
+    return [{"signal": pattern, "reason": f"패턴={pattern} — InitialAccessAgent 분석 입력으로 전달"}]
 
 
 # ── Blue-team 매핑 (DAH_SMU 환경 기준) ───────────────────────────────────
@@ -836,7 +827,7 @@ def _merge_better_observations(
 # ── Phase 5: Intel 저장 ───────────────────────────────────────────────────
 
 def _write_intel_handoff(path: str, uav_rec: dict[str, Any] | None,
-                          cd: dict[str, Any], candidates: list[dict[str, Any]],
+                          cd: dict[str, Any], recon_tags: dict[str, Any],
                           baseline: dict[str, Any] | None) -> None:
     """다른 공격 에이전트가 읽을 수 있는 경량 핸드오프 파일 생성."""
     handoff: dict[str, Any] = {
@@ -864,9 +855,9 @@ def _write_intel_handoff(path: str, uav_rec: dict[str, Any] | None,
             "in_oa":         uav_rec.get("in_operational_area") if uav_rec else None,
         },
         "api_baseline":       baseline,
-        "follow_on_agents":   candidates,
-        "link_degradation_ready": any(c["agent"] == "dah-jammer" for c in candidates),
-        "protocol_integrity_ready": any(c["agent"] == "tamper" for c in candidates),
+        "recon_tags":         recon_tags,
+        "analysis_hints":     recon_tags.get("analysis_hints", []),
+        "next_stage":         "InitialAccessAgent",
     }
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -946,27 +937,21 @@ def run(
     elif revalidate_s > 0:
         print(f"\n[passive-mavlink-recon] Phase 3: 전 자산 HIGH — 재검증 생략", flush=True)
 
-    # ── Phase 4: 후속 에이전트 매핑 ──────────────────────────────────────
-    print(f"\n[passive-mavlink-recon] Phase 4: DAH_SMU 후속 에이전트 매핑", flush=True)
+    # ── Phase 4: InitialAccessAgent 전달용 정찰 신호 정규화 ─────────────
+    print(f"\n[passive-mavlink-recon] Phase 4: 정찰 신호 정규화", flush=True)
     uav_rec    = report.assets.get(UAV_SYS_ID)
     uav_cd     = confidence_details(uav_rec) if uav_rec else {"score": 0.0, "label": "NO_DATA", "factors": {}}
-    candidates = dah_smu_follow_on(uav_rec or {}, float(uav_cd["score"]), baseline)
-
-    for c in candidates:
-        print(f"  [{c['agent']}] {c['action']}: {c['reason']}", flush=True)
-        print(f"    타이밍: {c.get('timing', '-')}", flush=True)
-
-    all_agents = [c["agent"] for c in candidates]
-    if all_agents:
-        _send_event(
-            "후속 에이전트 매핑 완료",
-            level="warn",
-            detail=" | ".join(f"{c['agent']}:{c['action']}" for c in candidates),
-            status="ALERT",
-        )
-
+    recon_tags = build_recon_tags(uav_rec or {}, float(uav_cd["score"]), baseline)
     timing_recs = timing_recommendations(uav_rec or {}, float(uav_cd["score"]))
-    print(f"\n[passive-mavlink-recon] 타이밍 권고: {timing_recs}", flush=True)
+    print(f"  tags={recon_tags.get('tags', [])}", flush=True)
+    print(f"  selection_owner={recon_tags.get('selection_owner')}", flush=True)
+    print(f"\n[passive-mavlink-recon] 분석 힌트: {timing_recs}", flush=True)
+    _send_event(
+        "정찰 신호 정규화 완료",
+        level="info",
+        detail=", ".join(recon_tags.get("tags", [])),
+        status="OK",
+    )
 
     # 위치 예측
     prediction = predict_position(uav_rec or {}, prediction_horizon_s) if uav_rec else None
@@ -1012,7 +997,7 @@ def run(
             "prediction":      prediction,
             "timing_recs":     timing_recs,
         },
-        "follow_on_agents":   candidates,
+        "recon_tags":         recon_tags,
         "revalidation":       revalidation_changes,
         "blue_team_mapping":  blue_team_mapping(),
         "ghost_sentinel":     ghost_sentinel_assessment(),
@@ -1024,9 +1009,9 @@ def run(
             json.dump(intel, fh, ensure_ascii=False, indent=2, default=str)
         print(f"\n[passive-mavlink-recon] Phase 5: intel 저장 → {output_path}", flush=True)
 
-        # intel_handoff.json (후속 에이전트용 경량 파일)
+        # intel_handoff.json (InitialAccessAgent용 경량 파일)
         handoff_path = chain_handoff_path or os.path.join(os.path.dirname(output_path), "intel_handoff.json")
-        _write_intel_handoff(handoff_path, uav_rec, uav_cd, candidates, baseline)
+        _write_intel_handoff(handoff_path, uav_rec, uav_cd, recon_tags, baseline)
         _send_event("인텔 저장 완료", detail=f"{output_path} + {handoff_path}", status="OK")
     else:
         print(json.dumps(intel, ensure_ascii=False, indent=2, default=str))

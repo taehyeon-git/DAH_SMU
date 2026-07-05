@@ -189,20 +189,19 @@ def normalize_legacy_recon_json(raw: dict[str, Any]) -> IntelDocument:
     baseline = raw.get("api_baseline") or raw.get("phase0_api_baseline") or {}
     if baseline:
         doc.observations.append({"type": "api_baseline", "value": baseline})
-    for item in raw.get("follow_on_agents", []):
-        params = dict(item.get("params", {}))
-        action = CandidateAction(
-            action_id=item.get("action", item.get("agent", "legacy-action")).replace(" ", "_"),
-            agent=item.get("agent", "unknown"),
-            action_type=item.get("action", "LEGACY_FOLLOW_ON"),
-            reason=item.get("reason", "legacy recon recommendation"),
-            params=params,
-            expected_effect=item.get("expected_effect", item.get("timing", "")),
-            risk="MEDIUM",
-            confidence=0.65,
-        )
-        doc.candidate_actions.append(action)
+    recon_tags = raw.get("recon_tags")
+    if isinstance(recon_tags, dict):
+        doc.observations.append({"type": "recon_tags", "value": recon_tags})
+    analysis_hints = raw.get("analysis_hints")
+    if isinstance(analysis_hints, list):
+        doc.observations.append({"type": "analysis_hints", "value": analysis_hints})
+    legacy_follow_on = raw.get("follow_on_agents", [])
+    if legacy_follow_on:
+        doc.observations.append({
+            "type": "legacy_follow_on_agents_ignored",
+            "reason": "Recon outputs no longer create executable candidates; InitialAccessAgent owns module selection.",
+            "count": len(legacy_follow_on),
+        })
     doc.confidence = 0.65 if doc.assets else 0.35
     validate_intel(doc)
     return doc
-

@@ -12,12 +12,14 @@ ReconAgent
 
 | 단계 | Agent | 입력 | 출력 | 역할 |
 |---|---|---|---|---|
-| 1 | `ReconAgent` | passive mirror/API 정찰 실행, `output/intel_handoff.json`, `output/passive_mavlink_intel.json` | `output/stage_1_recon.json` | 모든 정찰 이벤트를 실행하고 표준 `IntelDocument`로 정규화 |
-| 2 | `InitialAccessAgent` | `output/stage_1_recon.json` | `output/stage_2_initial_access.json`, `output/stage_2_attack_graph.json` | API surface, 자산, 통신 edge, GCS 모델, 후속공격 후보 생성 |
+| 1 | `ReconAgent` | passive mirror/API 정찰 실행, `output/intel_handoff.json`, `output/passive_mavlink_intel.json` | `output/stage_1_recon.json` | 모든 정찰 이벤트를 실행하고 `recon_tags`/`analysis_hints`를 표준 `IntelDocument`로 정규화 |
+| 2 | `InitialAccessAgent` | `output/stage_1_recon.json` | `output/stage_2_initial_access.json`, `output/stage_2_attack_graph.json` | `recon_tags`, API surface, 자산, 통신 edge, GCS 모델을 근거로 후속공격 후보 생성 |
 | 3 | `FollowUpAttackAgent` | `output/stage_2_initial_access.json` | `output/stage_3_attack_plan.json`, `output/stage_3_execution_report.json` | `AttackPlan` 생성 후 dry-run 또는 명시 실행 |
 
 세 단계는 파일 기반으로 연결됩니다.  
 즉, 1단계 산출물이 2단계 입력이고, 2단계 산출물이 3단계 입력입니다.
+
+역할 경계는 명확합니다. `ReconAgent`는 실행 가능한 후속공격 후보를 만들지 않고, `InitialAccessAgent`가 정찰 태그와 API/GCS 모델을 근거로 `candidate_actions`를 생성합니다.
 
 ## 안전 범위
 
@@ -322,4 +324,4 @@ output/stage_3_execution_report.json
 
 `stage_3_execution_report.json`에는 원본 정찰 파일, 생성된 계획, dry-run 또는 실행 결과, 대시보드 실행 전후 관측값이 포함됩니다.
 
-기존 JSON handoff 파일도 계속 사용할 수 있습니다. 새 체인은 이를 `IntelDocument`로 정규화하여, 각 에이전트가 독립적으로 정찰을 반복하는 대신 정찰에서 파생된 값을 후속 어댑터가 공통으로 사용하도록 합니다.
+기존 JSON handoff 파일도 계속 사용할 수 있습니다. 새 체인은 이를 `IntelDocument`로 정규화하여, 정찰에서 파생된 `recon_tags`와 API baseline을 `InitialAccessAgent`가 후보 선정 근거로 사용하도록 합니다.

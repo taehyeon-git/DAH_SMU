@@ -35,10 +35,13 @@ class ChainCoreTests(unittest.TestCase):
         doc = normalize_legacy_recon_json({
             "target": {"platform_id": "UAV-001", "host": "172.31.50.10", "cmd_port": 14551},
             "follow_on_agents": [{"agent": "dah-jammer", "action": "TMMR-JAM", "params": {"router_host": "dah-tactical-router", "jam_port": 14590}}],
+            "recon_tags": {"tags": ["CONFIDENCE_HIGH", "LINK_METRICS_AVAILABLE"], "selection_owner": "InitialAccessAgent"},
         })
         self.assertTrue(doc.safety["simulated_only"])
         self.assertEqual(doc.assets[0].asset_id, "UAV-001")
-        self.assertEqual(doc.candidate_actions[0].agent, "dah-jammer")
+        self.assertEqual(doc.candidate_actions, [])
+        self.assertTrue(any(obs["type"] == "recon_tags" for obs in doc.observations))
+        self.assertTrue(any(obs["type"] == "legacy_follow_on_agents_ignored" for obs in doc.observations))
 
     def test_recon_agent_creates_stage_output(self):
         tmp = os.path.join("output", "_test_stage_agent")
@@ -75,6 +78,7 @@ class ChainCoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(doc.assets), 4)
         self.assertTrue(any(edge.src == "dah-gcs" and edge.dst == "dah-tactical-router" for edge in doc.edges))
         self.assertTrue(doc.gcs_model.command_egress)
+        self.assertTrue(any(action.agent == "dah-jammer" for action in doc.candidate_actions))
         self.assertTrue(plan.steps)
 
     def test_safety_blocks_external_host(self):
