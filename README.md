@@ -8,125 +8,104 @@ DAH - **UAV/UGV 전술 무인체계 통신 구조 시뮬레이션**입니다.
 
 현재 대시보드는 UAV/UGV, GCS/Mission Control, Tactical Router, TICN-like Network 간의 Telemetry/Command 흐름과 링크 상태를 전장 시뮬레이션 형태로 시각화하며, AI 공격·방어 이벤트에 따른 상태 변화를 실시간으로 표시합니다.
 
-## 아키텍처
+## 빠른 실행
 
-```text
-┌──────────────────────────── UAV / UGV Asset Layer ─────────────────────────────┐
-│                                                                                │
-│  ┌────────────────── UAV Simulator ──────────────────┐ ┌──── UGV Simulator ──┐ │
-│  │ Autopilot / Flight Controller                      │ │ Vehicle Controller  ││
-│  │ - Flight Control Logic                             │ │ - Mobility Control  ││
-│  │ - Mission Command Execute                          │ │ - Command Execute   ││
-│  │                                                    │ │                     ││
-│  │ Companion Computer                                 │ │ Onboard / Mission   ││
-│  │ - MAVLink-like Telemetry / Command                 │ │ Computer            ││
-│  │ - Payload Status                                   │ │ - ROS2/MQTT-like    ││
-│  │ - GCS Communication                                │ │   Telemetry         ││
-│  │ - Command Receive / Forward                        │ │ - Sensor Status     ││
-│  │                                                    │ │ - GCS Communication ││
-│  └──────────────────────┬─────────────────────────────┘ └─────────┬──────────┘ │
-└─────────────────────────┼─────────────────────────────────────────┼────────────┘
-                          │ C2 Data Link                            │ C2 Data Link
-                          │ Telemetry / Report ↓                    │ Telemetry / Report ↓
-                          │ Command / Tasking ↑                     │ Command / Tasking ↑
-                          ▼                                         ▼
-
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ GCS / Ground Gateway / Mission Control Server                                 │
-│ - UAV / UGV Telemetry 수신 및 해석                                             │
-│ - 임무 상태 판단                                                               │
-│ - 수동 조작 / Command 생성                                                     │
-│ - Upper C2/BMS 명령 → UAV/UGV Command 변환                                    │
-│ - 전술망 메시지 변환: 위치 / 상태 / 임무 / 표적 / 영상 메타데이터              │
-└───────────────┬──────────────────────┬──────────────────────┬────────────────┘
-                │                      │                      │
-                ▼                      ▼                      ▼
-   ┌────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐
-   │ Dashboard          │  │ Telemetry           │  │ AI Defense Agent     │
-   │ - 상태/지도 시각화  │  │ Collector / LogDB  │  │ - 실시간 상태 분석    │
-   │ - 임무 표시         │  │ - Telemetry Log     │  │ - Command 무결성 검증│
-   │ - 경고 표시         │  │ - Command Log       │  │ - 이상징후 탐지      │
-   │ - 공격/방어 결과    │  │ - Network/Attack Log│  │ - 대응 정책 결정     │
-   └────────────────────┘  └─────────────────────┘  └──────────┬───────────┘
-                                                                │
-                                                                ▼
-                                                   Alert / Block / Quarantine
-                                                   Re-route / Fallback / Review
-
-               ▲
-               │ 통제된 공격 이벤트 주입
-┌──────────────┴──────────────────────────────────────────────────────────────┐
-│ AI Attack Agent                                                             │
-│ - Docker 가상 네트워크 내부 자동 공격 이벤트 생성                            │
-│ - Telemetry 위조 / Command 변조 / GPS 이상 좌표 주입                         │
-│ - 통신 지연 / 손실 / 차단 / 변조 이벤트                                      │
-│ - AI Defense Agent 탐지 성능 검증                                            │
-│ ※ 폐쇄형 UAV/UGV 도메인 가상 환경 내부에서만 동작                            │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-                          │
-                          │ 전술망 연동 데이터
-                          │ Report / Situation Data ↓
-                          │ Command / Tasking ↑
-                          ▼
-
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ Virtual Tactical Router / TIPS                                                │
-│ - Docker Network 기반 가상 전술 라우터                                         │
-│ - GCS / 전술망 간 IP 패킷 라우팅                                               │
-│ - 지연 / 손실 / 차단 / 변조 이벤트 적용 지점                                   │
-│ - QoS / 우선순위 처리 모사                                                     │
-│ - GCS가 변환한 전술망 데이터 중계                                              │
-│ ※ MAVLink / ROS2 직접 해석 없음                                               │
-└────────────────────────┬──────────────────────────────────────────────────────┘
-                         │ Report / Situation Data ↓
-                         │ Command / Tasking ↑
-                         ▼
-
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ TMMR / 전투무선체계 (CNRS-series)                                              │
-│ - 전술 무선 노드                                                               │
-│ - 음성 / 데이터 송수신                                                         │
-│ - TICN 접속 구간                                                               │
-│ - 전술 무선 링크 모사                                                          │
-└────────────────────────┬──────────────────────────────────────────────────────┘
-                         │ Report / Situation Data ↓
-                         │ Command / Tasking ↑
-                         ▼
-
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ TICN-like Tactical Network                                                    │
-│ - 전술정보통신망 모사                                                          │
-│ - 전술 데이터망                                                               │
-│ - C4ISR / 지휘통제망 연동 흐름 모사                                            │
-│ - 현장 전술 노드와 상위 지휘체계 연결                                          │
-└────────────────────────┬──────────────────────────────────────────────────────┘
-                         │ Report / Situation Data ↓
-                         │ Command / Tasking ↑
-                         ▼
-
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ Upper C2 / BMS Simulator                                                      │
-│ - 작전 상황 공유                                                              │
-│ - 표적 / 좌표 공유                                                            │
-│ - 감시 구역 지정                                                              │
-│ - 임무 변경 지시                                                              │
-│ - 상급부대 명령 하달                                                          │
-│ ※ UAV/UGV 직접 명령 없음 — GCS 경유하여 Command로 변환                        │
-└───────────────────────────────────────────────────────────────────────────────┘
+```powershell
+cd C:\Users\taehy\OneDrive\문서\UAS\DAH_SMU
+docker compose up -d --build
 ```
 
-## 구현 범위
+| 항목 | 주소/명령 |
+|---|---|
+| 대시보드 | `http://localhost:9000` |
+| 실시간 상태 API | `Invoke-RestMethod http://localhost:9000/api/live` |
+| 컨테이너 종료 | `docker compose down` |
+
+공격 체인은 자동으로 시작되지 않습니다. 정찰, 초기침투 분석, 후속 시뮬레이션은 아래 실행 순서에서 직접 실행합니다.
+
+## 아키텍처
+
+전체 구조는 `실기동 자산 계층 -> 지상통제 계층 -> 전술망 계층 -> 상위 C2/BMS 계층`으로 나뉩니다.
+
+```text
+┌──────────────────────┐
+│  UAV / UGV Assets    │
+│  dah-uav, dah-ugv    │
+└──────────┬───────────┘
+           │ Telemetry / Command
+           ▼
+┌──────────────────────┐
+│  Companion + GCS     │
+│  MAVLink ⇄ JSON      │
+└──────┬───────┬───────┘
+       │       │
+       │       └──────────────┐
+       ▼                      ▼
+┌──────────────┐      ┌────────────────────┐
+│  Dashboard   │      │ Tactical Router     │
+│  상황 시각화  │      │ TMMR / TICN 모사     │
+└──────┬───────┘      └─────────┬──────────┘
+       │                        │
+       ▼                        ▼
+┌──────────────┐      ┌────────────────────┐
+│ Defense Agent│      │ Mission Control     │
+│ 탐지 / 대응   │      │ Upper C2 / BMS      │
+└──────────────┘      └────────────────────┘
+
+Recon / Attack Agent는 기존 운용 경로를 직접 깨지 않고,
+정찰 mirror와 안전 이벤트 경로를 통해 Dashboard/C2에 evidence를 남깁니다.
+```
+
+### 데이터 흐름
+
+| 흐름 | 경로 | 설명 |
+|---|---|---|
+| UAV Telemetry | `dah-uav -> dah-companion -> dah-gcs` | SITL/MAVLink 데이터를 JSON 상태로 변환 |
+| Dashboard 표시 | `dah-gcs -> dah-dashboard` | 지도, 임무 상태, 링크 상태, 이벤트 표시 |
+| 전술망 연동 | `dah-gcs -> tactical-router -> mission-control` | TMMR/TICN-like 링크 품질과 상위 C2 흐름 모사 |
+| Recon mirror | `dah-companion -> dah-recon` | 기존 통신을 방해하지 않는 passive 수집 경로 |
+| 안전 후속 시뮬레이션 | `attack_agent -> router/dashboard` | 실제 공격 패킷이 아닌 lab event와 alert 전송 |
+
+### Agent 체인
+
+```text
+ReconAgent
+  └─ 정찰 실행 / intel_handoff 생성
+      ↓
+InitialAccessAgent
+  └─ API surface, asset, edge, follow-up 후보 분석
+      ↓
+FollowUpAttackAgent
+  └─ AttackPlan 생성 후 안전 시뮬레이션 실행
+      ↓
+Dashboard / C2 Evidence
+```
+
+### 주요 컴포넌트
+
+| 컴포넌트 | 역할 | 주요 출력 |
+|---|---|---|
+| `dah-uav` | ArduPilot SITL 기반 UAV 시뮬레이터 | MAVLink telemetry |
+| `dah-ugv` | UGV 상태/임무 시뮬레이터 | UGV telemetry |
+| `dah-companion` | MAVLink 수신, JSON 변환, Recon mirror | GCS JSON, mirror packet |
+| `dah-gcs` | Telemetry 수신 및 fan-out | Dashboard/Collector/Router 이벤트 |
+| `dah-dashboard` | 지도, 임무, 통신, Agent 이벤트 시각화 | `/api/live` |
+| `tactical-router` | TMMR/TICN-like 링크 품질, 손실, 재밍 모사 | Router status, link event |
+| `mission-control` | Upper C2/BMS 역할 | 작전 상태 API |
+| `attack_agent` | Recon → Initial Access → Follow-up 체인 | attack plan, execution report |
+| `defense_agent` | 이상징후 탐지 및 대응 로직 | alert/block/recovery event |
 
 ## 구현 범위
 
-본 프로젝트는 실제 군 통신망이나 장비를 구현하는 것이 아니라, Docker 기반 폐쇄형 UAV/UGV 가상 환경에서 Telemetry/Command 흐름과 AI 공격·방어 구조를 검증하는 통신 시뮬레이션이다.
+본 프로젝트는 실제 군 통신망이나 장비를 구현하는 것이 아니라, Docker 기반 폐쇄형 UAV/UGV 가상 환경에서 Telemetry/Command 흐름과 AI 공격·방어 구조를 검증하는 통신 시뮬레이션입니다.
 
-UAV/UGV는 상태 생성, 임무 수행, Telemetry 전송, Command 수신 기능을 모사하며, GCS/Mission Control은 이를 수신·해석해 Dashboard, LogDB, AI Defense Agent로 분기한다.
-
-AI Attack Agent는 통제된 공격 이벤트를 생성하고, AI Defense Agent는 Telemetry, Command Flow, Network Event, Mission State를 분석해 이상징후를 탐지한다.
-
-본 시나리오의 핵심은 Heartbeat 이상, Link Quality 저하, Telemetry Gap 등 통신 상태 이상을 통해 UAV/UGV의 Fail-safe 전환 가능성을 검증하는 것이다.
+| 범위 | 설명 |
+|---|---|
+| UAV/UGV 운용 | 상태 생성, 임무 수행, Telemetry 전송, Command 수신 모사 |
+| GCS/Mission Control | Telemetry 수신, Command 변환, Dashboard/Collector/Router fan-out |
+| Attack Agent | 정찰 결과 기반의 안전한 lab event와 alert 생성 |
+| Defense Agent | Telemetry, Command Flow, Network Event, Mission State 이상징후 탐지 |
+| Fail-safe 검증 | Heartbeat 이상, Link Quality 저하, Telemetry Gap 기반의 fail-safe 전환 가능성 확인 |
 
 ## 네트워크 구성
 
@@ -331,7 +310,8 @@ dah-gcs
 ## 실행
 
 ```powershell
-docker compose up -d --build dah-dashboard
+cd C:\Users\taehy\OneDrive\문서\UAS\DAH_SMU
+docker compose up -d --build
 ```
 
 ```text
