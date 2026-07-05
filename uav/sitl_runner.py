@@ -15,7 +15,7 @@ import time
 os.environ['MAVLINK20'] = '1'
 from pymavlink import mavutil
 
-CC_HOST  = os.getenv('CC_HOST', '172.20.0.30')
+CC_HOST  = os.getenv('CC_HOST', '172.31.50.30')
 CC_PORT  = int(os.getenv('CC_PORT', '14550'))
 CMD_PORT = int(os.getenv('CMD_PORT', '14551'))
 SPEEDUP  = int(os.getenv('SITL_SPEEDUP', '5'))

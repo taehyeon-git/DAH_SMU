@@ -172,7 +172,7 @@ UAV(`uav/sitl_runner.py`)는 실제 **ArduPilot SITL** 바이너리를 구동하
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ dah-uav  172.20.0.10                                            │
+│ dah-uav  172.31.50.10                                           │
 │                                                                 │
 │  ArduPlane SITL (TCP:5760 내부)                                   │
 │       ↕ pymavlink                                               │
@@ -181,11 +181,11 @@ UAV(`uav/sitl_runner.py`)는 실제 **ArduPilot SITL** 바이너리를 구동하
 │  - SYS_STATUS (battery_remaining, drop_rate_comm)               │
 │  - GLOBAL_POSITION_INT (lat, lon, alt, vx, vy, hdg)            │
 │  - MISSION_ITEM_REACHED (wp_seq)                                │
-│       ↓ MAVLink 2.0 / UDP broadcast 172.20.0.255:14550          │
+│       ↓ MAVLink 2.0 / UDP 172.31.50.30:14550                    │
 └─────────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│ dah-companion  172.20.0.30                                      │
+│ dah-companion  172.31.50.30                                     │
 │  companion_computer/app.py                                      │
 │  - udpin:0.0.0.0:14550 으로 MAVLink 수신                        │
 │  - HEARTBEAT  → state["mode"] 갱신                              │
@@ -201,6 +201,28 @@ UAV(`uav/sitl_runner.py`)는 실제 **ArduPilot SITL** 바이너리를 구동하
               └→ Router     :14560
 ```
 
+#### Recon Mirror 경로
+
+정찰 Phase 1이 실제 MAVLink-like 프레임을 수동 청취할 수 있도록, Companion Computer는 수신한 MAVLink 원본 바이트를 별도 mirror 대상으로 복제한다.
+
+```text
+dah-uav
+  ↓ MAVLink / UDP :14550
+dah-companion
+  ├─→ dah-gcs :14555              정상 Telemetry JSON 경로
+  └─→ dah-recon 172.31.50.40:14550  Passive Recon mirror 경로
+```
+
+이 mirror는 기존 C2/Telemetry 경로를 변경하지 않는다. `dah-recon`이 실행 중일 때만 Phase 1 수집에 사용되며, 정찰 컨테이너가 꺼져 있어도 Companion/GCS 흐름은 계속 동작한다.
+
+관련 환경 변수:
+
+| 변수 | 기본/설정값 | 의미 |
+|---|---|---|
+| `RECON_MIRROR_ENABLED` | `true` | MAVLink 원본 바이트 mirror 활성화 |
+| `RECON_MIRROR_HOST` | `172.31.50.40` | Passive Recon 고정 IP |
+| `RECON_MIRROR_PORT` | `14550` | Recon 수동 청취 포트 |
+
 #### 명령 경로 (GCS → UAV)
 
 명령 경로는 두 가지가 병렬 존재한다.
@@ -211,7 +233,7 @@ UAV(`uav/sitl_runner.py`)는 실제 **ArduPilot SITL** 바이너리를 구동하
 Dashboard /api/command  POST {"cmd": "RTB"}
     ↓ pymavlink MAVLink 2.0
     COMMAND_LONG (SYS_ID=255, target_system=1)
-    ↓ UDP 172.20.0.10:14551
+    ↓ UDP 172.31.50.10:14551
 dah-uav  sitl_runner.py  → SITL TCP:5760 브리지
     → ArduPlane SITL 실행
 ```
@@ -232,7 +254,7 @@ dah-uav  sitl_runner.py  → SITL TCP:5760 브리지
 Upper C2/BMS
     ↓ JSON / UDP :14546
 tactical-router  →  dah-gcs :14562  →  dah-companion :14552
-    ↓ MAVLink COMMAND_LONG / UDP 172.20.0.10:14551
+    ↓ MAVLink COMMAND_LONG / UDP 172.31.50.10:14551
 dah-uav
 ```
 
@@ -241,21 +263,24 @@ dah-uav
 ```
 dashboard/app.py  _gcs_heartbeat_sender()  1Hz
     HEARTBEAT (SYS_ID=255, MAV_TYPE_GCS, MAV_STATE_ACTIVE)
-    ↓ UDP 172.20.0.10:14551
+    ↓ UDP 172.31.50.10:14551
 dah-uav  gcs_heartbeat_watchdog()
     - elapsed < 5s → 정상 MISSION 유지
     - elapsed ≥ 5s → Fail-safe LOITER 전환  ← 공격 목표 지점
 ```
 
-#### 공격 에이전트 직접 주입
+#### 안전 후속 시뮬레이션
 
+현재 후속공격 단계는 실제 MAVLink 명령 주입이 아니라 로컬 Docker 테스트베드의 안전 이벤트로만 동작한다.
+
+```text
+FollowUpAttackAgent
+  ├─ EW_LINK_DEGRADATION_SIM       → Router 링크저하 이벤트 + Dashboard FAILSAFE_LAND 오버레이
+  └─ PROTOCOL_FRAME_INTEGRITY_SIM  → 합성 프레임 검증 실패 + Dashboard INTEGRITY_ALERT
 ```
-executor.py / failsafe_inducer.py  (SYS_ID=99, GCS 위장 시 SYS_ID=255)
-    COMMAND_LONG (MAV_CMD_NAV_LAND 등)
-    ↓ UDP 172.20.0.10:14551
-dah-uav  listen_for_commands()
-    - SYS_ID 검증 없음 → 공격 명령 그대로 실행  ← MAVLink 취약점
-```
+
+`FAILSAFE_INDUCTION` 실행이 성공하면 Dashboard는 안전한 로컬 시뮬레이션으로 UAV 상태를 `FAILSAFE_LAND`로 전환한다.
+이때 실제 SITL/MAVLink 제어 명령을 보내는 것이 아니라 `/api/live` 응답에서 UAV의 `lat/lon`을 고정하고 `speed=0`, `mission=FAILSAFE_STOPPED`로 표시하며, 고도를 점진적으로 낮춰 `FAILSAFE_LANDED` 상태까지 보여준다.
 
 ### Companion Computer (MAVLink → JSON 변환)
 
@@ -285,15 +310,13 @@ dah-gcs
   └─→ tactical-router  :14560  (TMMR/TICN 시뮬레이션 후 Upper C2로 전달)
 ```
 
-### 공격 에이전트 통신
+### 정찰/후속 시뮬레이션 통신
 
 | 에이전트 | 통신 방식 | 공격 대상 |
 |---------|---------|---------|
 | `recon.py` | MAVLink 도청 (UDP :14550 수신) | UAV 텔레메트리 |
-| `executor.py` | pymavlink `COMMAND_LONG` 주입 (SYS_ID=99 위장) | UAV :14551 |
-| `jammer.py` | HTTP POST `/api/ticn/jam` | Router TICN 링크 |
-| `failsafe_inducer.py` | MAVLink `HEARTBEAT` 전송 + HTTP POST | UAV + Router |
-| `heartbeat_spoofer.py` | pymavlink `HEARTBEAT` (SYS_ID=255 GCS 위장) | UAV :14551 |
+| `EW_LINK_DEGRADATION_SIM` | UDP JSON lab event | Router TICN 링크 |
+| `PROTOCOL_FRAME_INTEGRITY_SIM` | 합성 프레임 alert JSON | Dashboard `/api/agent-event` |
 
 ### 방어 에이전트 통신
 
@@ -313,5 +336,125 @@ docker compose up -d --build dah-dashboard
 
 ```text
 Dashboard: http://localhost:9000
-Mission Control API: http://localhost:9000/api/dashboard
+Dashboard Live API: http://localhost:9000/api/live
 ```
+
+### 실행 Profile 구분
+
+기본 테스트베드는 profile 없이 실행한다. 이 명령은 UAV/UGV, GCS, Router, Dashboard만 올리며 공격 에이전트를 자동 실행하지 않는다.
+
+```powershell
+docker compose up -d --build
+```
+
+정찰은 기본적으로 `ReconAgent`가 실행한다. `ReconAgent`는 내부적으로 `dah-recon` 서비스를 실행해 passive mirror 수집을 수행한 뒤, 결과를 표준 `IntelDocument`로 정규화한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage recon
+```
+
+이미 생성된 정찰 JSON만 다시 정규화하고 싶을 때는 아래 옵션을 사용한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage recon --skip-recon-collection
+```
+
+## Recon-driven 공격 체인
+
+정찰 결과를 사람이 읽는 JSON에서 끝내지 않고, `ReconAgent -> InitialAccessAgent -> FollowUpAttackAgent` 3단계로 연결한다.
+
+```text
+1. ReconAgent
+   - 실행: passive MAVLink mirror 수집, Dashboard/Failsafe API 사전 정찰, 후속 에이전트 후보 매핑
+   - 입력/중간 산출물: output/intel_handoff.json, output/passive_mavlink_intel.json
+   - 출력: output/stage_1_recon.json
+   - 역할: 모든 정찰 이벤트 실행 후 산출물을 표준 IntelDocument로 정규화
+
+2. InitialAccessAgent
+   - 입력: output/stage_1_recon.json
+   - 출력: output/stage_2_initial_access.json, output/stage_2_attack_graph.json
+   - 역할: API surface, 자산, 경로, GCS 모델, 후속공격 후보 생성
+
+3. FollowUpAttackAgent
+   - 입력: output/stage_2_initial_access.json
+   - 출력: output/stage_3_attack_plan.json, output/stage_3_execution_report.json
+   - 역할: AttackPlan 생성 후 dry-run 또는 명시적 안전 시뮬레이션 실행
+```
+
+전체 체인은 아래 문서에 정리되어 있다.
+
+```text
+attack_agent/README_CHAIN.md
+```
+
+기본은 dry-run이며, 실제 Docker lab 이벤트 실행은 `--execute`와 `ENABLE_LAB_ATTACKS=true`가 모두 있어야 한다.
+체인 실행 시 PowerShell/Windows 호스트에서는 Docker 서비스명이 `localhost` 공개 포트로 자동 매핑되고, Docker 컨테이너 내부에서는 `dah-dashboard`, `dah-tactical-router` 같은 내부 DNS 이름이 그대로 사용된다.
+
+### 3단계 Kill Chain 실행
+
+ReconAgent가 정찰 수집 컨테이너 실행과 정규화를 한 번에 수행한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage recon
+```
+
+정찰 시간을 줄이고 싶으면 아래처럼 조정한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage recon --recon-duration-s 10 --recon-revalidate-s 5
+```
+
+정찰 결과를 기반으로 초기침투 분석과 attack graph를 생성한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage initial-access
+```
+
+초기침투 분석 결과를 기반으로 후속공격 계획을 dry-run으로 확인한다.
+
+```powershell
+python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTION --max-steps 1
+```
+
+명시적으로 안전 시뮬레이션 이벤트를 실행한다.
+
+```powershell
+$env:ENABLE_LAB_ATTACKS="true"
+python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTION --execute --max-steps 1
+```
+
+한 번에 전체 체인을 dry-run으로 돌릴 수도 있다.
+
+```powershell
+python -m attack_agent.kill_chain --stage all --objective PROTOCOL_INTEGRITY_TEST --max-steps 1
+```
+
+### 계획 생성과 실제 이벤트 전송 차이
+
+체인 실행은 크게 세 단계로 나뉜다.
+
+| 실행 방식 | 이벤트 전송 | 설명 |
+|---|---:|---|
+| 기본 follow-up 실행 | X | 전체 체인을 점검하지만 Dashboard/C2로 이벤트를 보내지 않음 |
+| `ENABLE_LAB_ATTACKS=true` + `--execute` | O | Docker 내부 테스트베드로 안전 시뮬레이션 이벤트 전송 |
+
+실제 이벤트 전송 예시는 아래와 같다.
+
+```powershell
+cd C:\Users\taehy\OneDrive\문서\UAS\DAH_SMU
+docker compose up -d --build
+
+$env:ENABLE_LAB_ATTACKS="true"
+python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTION --execute --max-steps 1
+```
+
+합성 저수준 프레임 무결성 테스트를 C2 보고 경로로 보내려면 아래처럼 실행한다.
+
+```powershell
+$env:ENABLE_LAB_ATTACKS="true"
+python -m attack_agent.kill_chain --stage follow-up --objective PROTOCOL_INTEGRITY_TEST --execute --max-steps 1
+```
+
+여기서 전송되는 이벤트는 실제 MAVLink/RF/UDP 공격 트래픽이 아니라, 로컬 Docker 테스트베드 안에서만 처리되는 안전한 시뮬레이션 이벤트다.  
+`FAILSAFE_INDUCTION`은 대시보드 로컬 상태머신을 통해 UAV를 `FAILSAFE_LAND`로 표시하고, 현재 위치 고정 + 속도 0 + 고도 하강 오버레이를 적용한다.
+상세한 실행 순서, 출력 파일, 지원 모듈, 합성 프레임 변조 모드는 `attack_agent/README_CHAIN.md`를 참고한다.

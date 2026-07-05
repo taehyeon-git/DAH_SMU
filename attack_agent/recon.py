@@ -6,8 +6,8 @@
   Phase 1: UDP 14550 수동 MAVLink 청취  (120s, dah-net 브로드캐스트)
   Phase 2: 6-팩터 신뢰도 채점
   Phase 3: LOW 자산 단기 재검증  (20s)
-  Phase 4: DAH_SMU 후속 에이전트 매핑
-             dah-executor / dah-spoofer / dah-jammer / dah-inducer
+  Phase 4: DAH_SMU 후속 안전 모듈 매핑
+             EW_LINK_DEGRADATION_SIM / PROTOCOL_FRAME_INTEGRITY_SIM
   Phase 5: JSON 저장  (intel.json + intel_handoff.json)
 
 보안 제약: raw socket 없음, 패킷 주입 없음, 실제 군 장비 미연결.
@@ -27,7 +27,7 @@ from typing import Any
 from mavlink_parser import ParsedMavlinkFrame, parse_datagram
 
 # ── 수신 설정 ──────────────────────────────────────────────────────────────
-LISTEN_PORT = 14550   # UAV(172.20.0.10) → dah-net 브로드캐스트 포트
+LISTEN_PORT = 14550   # UAV → dah-net 브로드캐스트 포트
 LISTEN_HOST = "0.0.0.0"
 
 # ── Dashboard / ops_net 통신 ───────────────────────────────────────────────
@@ -60,8 +60,8 @@ def _send_event(message: str, level: str = "info", detail: str = "", status: str
 # UAV-001 (송골매) 운용 제원
 UAV_PLATFORM_ID  = "UAV-001"
 UAV_SYS_ID       = 1
-UAV_HOST         = "172.20.0.10"
-UAV_CMD_PORT     = 14551
+UAV_HOST         = os.getenv("UAV_HOST", "172.31.50.10")
+UAV_CMD_PORT     = int(os.getenv("UAV_CMD_PORT", "14551"))
 UAV_CRUISE_ALT_M = 3500.0        # 순항 고도 (m)
 UAV_CRUISE_SPD_MS= 166.7         # 600 km/h → m/s
 
@@ -71,8 +71,7 @@ OA_LAT_MAX = 37.960
 OA_LON_MIN = 126.790
 OA_LON_MAX = 126.920
 
-# 후속 에이전트 (dah-net / ops_net 주소)
-AGENT_EXECUTOR_HOST = "172.20.0.50"   # dah-executor
+# 후속 안전 모듈 대상 (dah-net / ops_net 주소)
 AGENT_JAMMER_HOST   = "dah-tactical-router"
 AGENT_JAM_PORT      = 14590
 
@@ -372,63 +371,14 @@ def dah_smu_follow_on(
     baseline: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    신뢰도와 UAV 상태를 기반으로 DAH_SMU 실제 에이전트 목록을 반환.
+    신뢰도와 UAV 상태를 기반으로 DAH_SMU 안전 후속 모듈 목록을 반환.
     각 후보는 agent, action, reason, params 필드를 포함.
     """
     if score < CONF_MEDIUM:
         return []
 
     candidates: list[dict[str, Any]] = []
-    armed    = bool(rec.get("is_armed"))
-    alt_m    = float(rec.get("alt_m") or 0.0)
-    lat      = rec.get("lat_deg")
-    lon      = rec.get("lon_deg")
     pattern  = classify_pattern(rec)
-    in_oa    = _is_in_operational_area(lat, lon)
-
-    # ── dah-executor: LAND 명령 주입 ─────────────────────────────────────
-    # 조건: 무장 + 고도 >500m + HIGH 신뢰도
-    if armed and alt_m > 500 and score >= CONF_HIGH:
-        candidates.append({
-            "agent":  "dah-executor",
-            "action": "LAND-INJECT",
-            "reason": f"UAV 무장 + 고도 {alt_m:.0f}m → LAND 명령 주입 타이밍 적합",
-            "timing": "즉시 실행 가능" if alt_m > 1000 else "저고도 — 효과 제한적",
-            "params": {
-                "target_host": UAV_HOST,
-                "cmd_port":    UAV_CMD_PORT,
-                "sys_id":      rec.get("sys_id", UAV_SYS_ID),
-                "attacker_sys_id": 99,
-            },
-        })
-    elif armed and alt_m <= 500:
-        candidates.append({
-            "agent":  "dah-executor",
-            "action": "LAND-INJECT (저고도 — 효과 제한)",
-            "reason": f"UAV 무장이나 고도 {alt_m:.0f}m — 이미 착륙 접근 중",
-            "timing": "보류 — 재검증 후 결정",
-            "params": {},
-        })
-
-    # ── dah-spoofer: GPS 좌표 위조 ────────────────────────────────────────
-    # 조건: 위치 파악 완료
-    if lat is not None and lon is not None:
-        candidates.append({
-            "agent":  "dah-spoofer",
-            "action": "GPS-SPOOF",
-            "reason": "UAV 현재 위치 확보 — 스푸핑 시작 좌표 준비 완료",
-            "timing": "PATROL_TRANSIT 또는 MISSION_PROGRESS 중 주입 효과 최대",
-            "params": {
-                "gcs_host":    "dah-gcs",
-                "gcs_port":    14555,
-                "start_lat":   lat,
-                "start_lon":   lon,
-                "start_alt":   alt_m,
-                "spoof_target_lat": 38.50,   # 현재 spoofer.py 하드코딩값
-                "spoof_target_lon": 126.60,
-                "in_oa_at_recon": in_oa,
-            },
-        })
 
     # ── dah-jammer: TMMR 전파 재밍 ───────────────────────────────────────
     # 조건: 링크 상태 모니터링 완료 + 비행 중 (패턴이 LOITER가 아닌 경우 효과적)
@@ -436,7 +386,7 @@ def dah_smu_follow_on(
     jam_optimal = pattern in {"PATROL_TRANSIT", "PATROL_TURNING", "MISSION_PROGRESS", "TRANSIT"}
     candidates.append({
         "agent":  "dah-jammer",
-        "action": "TMMR-JAM",
+        "action": "EW_LINK_DEGRADATION_SIM",
         "reason": (
             f"링크 모니터링 완료 (drop_rate={drop_rate:.0f}) — "
             f"{'비행 중 주입 효과 최대' if jam_optimal else 'LOITER 중 주입 — 즉각 반응 약함'}"
@@ -447,33 +397,23 @@ def dah_smu_follow_on(
             "jam_port":    AGENT_JAM_PORT,
             "channels":    ["VHF", "UHF", "HF"],
             "duration_s":  14,
-            "interval_s":  6,
         },
     })
 
-    # ── dah-inducer: Fail-safe 유도 ───────────────────────────────────────
-    # 조건: API 사전 정찰에서 fail-safe 정책 수집 완료
+    # ── tamper: 합성 프로토콜 프레임 무결성 테스트 ───────────────────────
+    # 조건: 위치 또는 API baseline 중 하나라도 확보된 경우
     if baseline and baseline.get("api_available"):
-        hb_to  = baseline.get("hb_timeout_sec", 5)
-        lc_pct = baseline.get("loss_critical_pct", 15)
-        lat_ms = baseline.get("latency_critical_ms", 1500)
         candidates.append({
-            "agent":  "dah-inducer",
-            "action": "FAILSAFE-INDUCE",
-            "reason": (
-                f"Fail-safe 정책 확보 — "
-                f"HB timeout={hb_to}s, loss critical={lc_pct}%, "
-                f"latency critical={lat_ms}ms, action={baseline.get('failsafe_action')}"
-            ),
-            "timing": "4단계 순차 실행 (HB누락→손실률→지연→간헐적)",
+            "agent":  "tamper",
+            "action": "PROTOCOL_FRAME_INTEGRITY_SIM",
+            "reason": "Dashboard/Failsafe API baseline 확보 — 합성 프레임 무결성 경고 경로 검증 가능",
+            "timing": "즉시 가능 — 실제 MAVLink/UDP 공격 트래픽 없이 로컬 합성 프레임만 사용",
             "params": {
-                "hb_timeout_sec":      hb_to,
-                "hb_max_miss":         baseline.get("hb_max_miss", 5),
-                "loss_critical_pct":   lc_pct,
-                "latency_critical_ms": lat_ms,
-                "failsafe_action":     baseline.get("failsafe_action", "LOITER"),
-                "dashboard_host":      DASHBOARD_HOST,
-                "router_host":         AGENT_JAMMER_HOST,
+                "dst_asset": "local-parser",
+                "dst_host": "localhost",
+                "dst_port": 14550,
+                "mutation": "FRAME_CRC_BREAK",
+                "protocol": "MAVLink-like",
             },
         })
 
@@ -488,17 +428,17 @@ def timing_recommendations(rec: dict[str, Any], score: float) -> list[dict[str, 
     armed   = bool(rec.get("is_armed"))
 
     if pattern == "LOITER_HOLDING":
-        return [{"candidate": "dah-inducer", "reason": "LOITER 상태 — Fail-safe 유도로 복귀 지연 유발"}]
+        return [{"candidate": "dah-jammer", "reason": "LOITER 상태 — 링크 저하 시뮬레이션으로 fail-safe 표시 확인"}]
     if pattern == "PATROL_TURNING":
-        return [{"candidate": "dah-spoofer", "reason": "선회 기동 — 소폭 좌표 변화가 GCS 탐지 회피 유리"}]
+        return [{"candidate": "tamper", "reason": "선회 기동 중 합성 프레임 무결성 테스트로 parser resilience 확인"}]
     if pattern == "DESCENT_OR_RTL":
         return [{"candidate": "dah-jammer", "reason": "귀환 중 — 링크 두절 시 LOITER 지속 또는 방어 회피"}]
     if pattern == "PATROL_TRANSIT" and armed and alt_m > 1000:
-        return [{"candidate": "dah-executor", "reason": f"순항 중 + 무장 + 고도 {alt_m:.0f}m — LAND 주입 최적"}]
+        return [{"candidate": "dah-jammer", "reason": f"순항 중 + 고도 {alt_m:.0f}m — 링크 저하 시뮬레이션 효과 관측 용이"}]
     if pattern == "OUT_OF_AREA":
-        return [{"candidate": "dah-spoofer", "reason": "작전구역 이탈 감지 — 스푸핑으로 이탈 가속 가능"}]
+        return [{"candidate": "tamper", "reason": "작전구역 이탈 감지 — 합성 무결성 경고로 C2 권고 변화 확인"}]
     if pattern == "MISSION_UPLOAD_ACTIVITY":
-        return [{"candidate": "dah-inducer", "reason": "미션 업로드 중 — 링크 저하로 업로드 실패 유발"}]
+        return [{"candidate": "dah-jammer", "reason": "미션 업로드 중 — 링크 저하 시뮬레이션으로 C2 반응 확인"}]
     return [{"candidate": "dah-jammer", "reason": f"패턴={pattern} — 재밍으로 상태 변화 관측 후 재분석"}]
 
 
@@ -518,20 +458,20 @@ def blue_team_mapping() -> list[dict[str, Any]]:
             "expected_visibility":   "중간",
             "reason":                "UDP 14550 브로드캐스트는 다중 수신 가능; dah-recon 컨테이너 식별 어려움",
             "recommended_control":   "dah-net 세그먼트의 비인가 UDP bind 이벤트 경보",
-            "dah_smu_component":     "docker network: dah-net (172.20.0.0/24)",
+            "dah_smu_component":     "docker network: dah-net (172.31.50.0/24)",
         },
         {
             "layer":                 "컨테이너 런타임 / Docker 이벤트",
             "expected_visibility":   "높음",
-            "reason":                "cyber-lab 프로파일 컨테이너 시작/커맨드라인/stdout은 Docker 이벤트로 관측",
+            "reason":                "recon-lab 프로파일 컨테이너 시작/커맨드라인/stdout은 Docker 이벤트로 관측",
             "recommended_control":   "docker events 모니터링 + 비인가 프로파일 컨테이너 기동 감사",
-            "dah_smu_component":     "dah-recon (cyber-lab profile, 172.20.0.40)",
+            "dah_smu_component":     "dah-recon (recon-lab profile, 172.31.50.40)",
         },
         {
             "layer":                 "호스트 EDR / eBPF",
             "expected_visibility":   "중간-높음",
             "reason":                "SO_REUSEADDR + SO_REUSEPORT로 14550 bind — 프로세스 소켓 이벤트 추적 가능",
-            "recommended_control":   "UDP 14550 bind 이벤트 + 172.20.0.40 출처 트래픽 감사",
+            "recommended_control":   "UDP 14550 bind 이벤트 + 172.31.50.40 출처 트래픽 감사",
             "dah_smu_component":     "attack_agent/recon.py 소켓 개방",
         },
         {
@@ -539,7 +479,7 @@ def blue_team_mapping() -> list[dict[str, Any]]:
             "expected_visibility":   "노출=높음 / 수신자 식별=낮음",
             "reason":                "MAVLink 서명 없이 브로드캐스트되면 평문 텔레메트리 전체 노출",
             "recommended_control":   "MAVLink v2 서명 강제 적용 + 브로드캐스트 범위 축소 (단방향 unicast)",
-            "dah_smu_component":     "uav/mock_uav.py → 172.20.0.255:14550 브로드캐스트",
+            "dah_smu_component":     "uav/mock_uav.py → dah-companion:14550",
         },
     ]
 
@@ -925,11 +865,8 @@ def _write_intel_handoff(path: str, uav_rec: dict[str, Any] | None,
         },
         "api_baseline":       baseline,
         "follow_on_agents":   candidates,
-        "executor_ready":     any(c["agent"] == "dah-executor" for c in candidates
-                                  if "LAND-INJECT" in c.get("action", "")),
-        "spoofer_ready":      any(c["agent"] == "dah-spoofer" for c in candidates),
-        "jammer_ready":       True,   # 항상 가능
-        "inducer_ready":      bool(baseline and baseline.get("api_available")),
+        "link_degradation_ready": any(c["agent"] == "dah-jammer" for c in candidates),
+        "protocol_integrity_ready": any(c["agent"] == "tamper" for c in candidates),
     }
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -947,6 +884,7 @@ def run(
     prediction_horizon_s: int,
     output_path: str | None,
     skip_phase0: bool = False,
+    chain_handoff_path: str | None = None,
 ) -> dict[str, Any]:
     print("[passive-mavlink-recon] Low-Privilege Sentinel 시작 (DAH_SMU)", flush=True)
     print(f"  listen={listen_host}:{listen_port}  duration_s={duration_s}", flush=True)
@@ -1087,9 +1025,7 @@ def run(
         print(f"\n[passive-mavlink-recon] Phase 5: intel 저장 → {output_path}", flush=True)
 
         # intel_handoff.json (후속 에이전트용 경량 파일)
-        handoff_path = os.path.join(
-            os.path.dirname(output_path), "intel_handoff.json"
-        )
+        handoff_path = chain_handoff_path or os.path.join(os.path.dirname(output_path), "intel_handoff.json")
         _write_intel_handoff(handoff_path, uav_rec, uav_cd, candidates, baseline)
         _send_event("인텔 저장 완료", detail=f"{output_path} + {handoff_path}", status="OK")
     else:
@@ -1108,6 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revalidate-s",  type=int, default=20)
     parser.add_argument("--prediction-horizon-s", type=int, default=60)
     parser.add_argument("--output",               default="/app/output/passive_mavlink_intel.json")
+    parser.add_argument("--chain-handoff",         default=None)
     parser.add_argument("--skip-phase0",   action="store_true",
                         help="Dashboard API 사전 정찰 생략 (완전 수동 모드)")
     args = parser.parse_args(argv)
@@ -1119,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
         prediction_horizon_s=args.prediction_horizon_s,
         output_path=args.output,
         skip_phase0=args.skip_phase0,
+        chain_handoff_path=args.chain_handoff,
     )
     return 0
 

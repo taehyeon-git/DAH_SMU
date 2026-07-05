@@ -17,13 +17,18 @@ MAVLINK_PORT = int(os.getenv("MAVLINK_PORT",  "14550"))
 GCS_HOST     = os.getenv("GCS_HOST",  "dah-gcs")
 GCS_PORT     = int(os.getenv("GCS_PORT",  "14555"))       # CC → GCS 텔레메트리
 CMD_PORT     = int(os.getenv("CMD_PORT",  "14552"))        # GCS → CC 명령 수신
-UAV_HOST     = os.getenv("UAV_HOST",  "172.20.0.10")
+UAV_HOST     = os.getenv("UAV_HOST",  "172.31.50.10")
 UAV_CMD_PORT = int(os.getenv("UAV_CMD_PORT", "14551"))
+RECON_MIRROR_ENABLED = os.getenv("RECON_MIRROR_ENABLED", "true").lower() == "true"
+RECON_MIRROR_HOST = os.getenv("RECON_MIRROR_HOST", "dah-recon")
+RECON_MIRROR_PORT = int(os.getenv("RECON_MIRROR_PORT", "14550"))
 PLATFORM_ID  = "UAV-001"
 SYS_ID       = 1
 
 state = {}
 gcs_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+mirror_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+last_mirror_error_at = 0.0
 
 
 def send_to_gcs(payload):
@@ -31,6 +36,22 @@ def send_to_gcs(payload):
         gcs_sock.sendto(json.dumps(payload).encode("utf-8"), (GCS_HOST, GCS_PORT))
     except Exception as e:
         print(f"[CC] GCS 전송 실패: {e}")
+
+
+def mirror_to_recon(msg) -> None:
+    """Mirror parsed MAVLink bytes to the passive recon listener without changing the C2 path."""
+    global last_mirror_error_at
+    if not RECON_MIRROR_ENABLED:
+        return
+    try:
+        raw = bytes(msg.get_msgbuf())
+        if raw:
+            mirror_sock.sendto(raw, (RECON_MIRROR_HOST, RECON_MIRROR_PORT))
+    except Exception as e:
+        now = time.time()
+        if now - last_mirror_error_at > 10:
+            last_mirror_error_at = now
+            print(f"[CC] Recon mirror 전송 실패: {e}")
 
 
 def listen_commands():
@@ -85,6 +106,10 @@ def main():
     print("[CC] Companion Computer 시작")
     print(f"[CC] MAVLink 수신 ← {MAVLINK_HOST}:{MAVLINK_PORT}  (UAV FC 브로드캐스트)")
     print(f"[CC] Telemetry 전송 → {GCS_HOST}:{GCS_PORT}  (GCS)")
+    if RECON_MIRROR_ENABLED:
+        print(f"[CC] Recon mirror → {RECON_MIRROR_HOST}:{RECON_MIRROR_PORT}  (passive copy)")
+    else:
+        print("[CC] Recon mirror 비활성화")
     print(f"[CC] Command 수신 → 포트 {CMD_PORT}  (GCS → CC)")
     print("-" * 50)
 
@@ -96,6 +121,7 @@ def main():
         msg_type = msg.get_type()
         sys_id   = msg.get_srcSystem()
         seq      = msg._header.seq
+        mirror_to_recon(msg)
 
         if msg_type == "HEARTBEAT":
             state["sys_id"] = sys_id

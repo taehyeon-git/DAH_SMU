@@ -9,13 +9,13 @@ services:
     depends_on:
       - dah-companion
     environment:
-      CC_HOST: 172.20.0.30        # companion computer IP
+      CC_HOST: 172.31.50.30        # companion computer IP
       CC_PORT: "14550"
       CMD_PORT: "14551"
       SITL_SPEEDUP: "5"
     networks:
       dah-net:
-        ipv4_address: 172.20.0.10         # UAV 고정 IP
+        ipv4_address: 172.31.50.10         # UAV 고정 IP
 
   # ── Companion Computer (UAV 탑재 컴퓨터)
   # MAVLink 수신(dah-net) → JSON 변환 → GCS UDP(ops_net)
@@ -29,13 +29,16 @@ services:
       GCS_HOST: dah-gcs
       GCS_PORT: 14555                     # CC → GCS 텔레메트리
       CMD_PORT: 14552                     # GCS → CC 직접 명령
-      UAV_HOST: 172.20.0.10
+      UAV_HOST: 172.31.50.10
       UAV_CMD_PORT: 14551
+      RECON_MIRROR_ENABLED: "true"
+      RECON_MIRROR_HOST: 172.31.50.40
+      RECON_MIRROR_PORT: "14550"
     depends_on:
       - dah-gcs
     networks:
       dah-net:
-        ipv4_address: 172.20.0.30         # dah-net: UAV MAVLink 수신
+        ipv4_address: 172.31.50.30         # dah-net: UAV MAVLink 수신
       ops_net:                             # ops_net: GCS로 텔레메트리 전달
 
   # ── UGV 시뮬레이터
@@ -53,7 +56,7 @@ services:
     networks:
       uav_net:
       dah-net:
-        ipv4_address: 172.20.0.20
+        ipv4_address: 172.31.50.20
 
   # ── GCS / Ground Gateway / Mission Control Server  ← 중앙 허브
   # CC(UAV) 텔레메트리 직수신 → Dashboard / Collector / Router fan-out
@@ -89,6 +92,9 @@ services:
       context: .
       dockerfile: tactical_router/Dockerfile
     container_name: dah-tactical-router
+    ports:
+      - "8084:8080"
+      - "14590:14590/udp"
     environment:
       GCS_LISTEN_PORT: 14560              # GCS → Router 전술 릴레이 (UAV)
       UGV_LISTEN_PORT: 14660              # UGV → Router 직접
@@ -142,23 +148,27 @@ services:
       MISSION_CONTROL_URL: http://mission-control:8080
       GCS_URL: http://dah-gcs:8080
       ROUTER_TELEMETRY_PORT: 14571        # GCS → Dashboard UDP fan-out 수신 포트
-      UAV_HOST: 172.20.0.10
+      UAV_HOST: 172.31.50.10
       UAV_CMD_PORT: 14551
-      UGV_HOST: 172.20.0.20
+      UGV_HOST: 172.31.50.20
       UGV_CMD_PORT: 14661
     networks:
       ops_net:
       dah-net:
-        ipv4_address: 172.20.0.70
+        ipv4_address: 172.31.50.70
 
   # ── 정찰 에이전트 (Passive MAVLink Recon — Low-Privilege Sentinel)
   dah-recon:
-    profiles: ["cyber-lab"]
+    profiles: ["recon-lab"]
     restart: "no"
     build:
       context: .
       dockerfile: attack_agent/Dockerfile
     container_name: dah-recon
+    depends_on:
+      - dah-dashboard
+      - dah-uav
+      - dah-companion
     command:
       - python
       - recon.py
@@ -167,99 +177,31 @@ services:
       - --listen-port
       - "14550"
       - --duration-s
-      - "120"
+      - "${RECON_DURATION_S:-30}"
       - --revalidate-s
-      - "20"
+      - "${RECON_REVALIDATE_S:-20}"
       - --prediction-horizon-s
-      - "60"
+      - "${RECON_PREDICTION_HORIZON_S:-60}"
+      - --chain-handoff
+      - /app/output/intel_handoff.json
       - --output
       - /app/output/passive_mavlink_intel.json
     environment:
       DASHBOARD_HOST: dah-dashboard
       DASHBOARD_PORT: "14571"
+      UAV_HOST: 172.31.50.10
+      UAV_CMD_PORT: "14551"
+      AGENT_EXECUTOR_HOST: 172.31.50.50
     volumes:
       - ./output:/app/output
     networks:
       dah-net:
-        ipv4_address: 172.20.0.40
-      ops_net:
-
-  # ── 공격 에이전트 (LAND 명령 주입)
-  dah-executor:
-    profiles: ["cyber-lab"]
-    restart: "no"
-    build:
-      context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-executor
-    command: ["python", "executor.py"]
-    environment:
-      DASHBOARD_HOST: dah-dashboard
-      DASHBOARD_PORT: "14571"
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.50
-      ops_net:
-
-  # ── 재밍 에이전트 (TMMR 전파 방해)
-  dah-jammer:
-    profiles: ["cyber-lab"]
-    restart: "no"
-    build:
-      context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-jammer
-    command: ["python", "jammer.py"]
-    environment:
-      DASHBOARD_HOST: dah-dashboard
-      DASHBOARD_PORT: "14571"
-      ROUTER_HOST: dah-tactical-router
-      JAM_PORT: "14590"
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.55
-      ops_net:
-
-  # ── GPS 스푸핑 에이전트 (좌표 위조)
-  dah-spoofer:
-    profiles: ["cyber-lab"]
-    restart: "no"
-    build:
-      context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-spoofer
-    command: ["python", "spoofer.py"]
-    environment:
-      GCS_HOST: dah-gcs
-      GCS_PORT: "14555"
-      DASHBOARD_HOST: dah-dashboard
-      DASHBOARD_PORT: "14571"
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.56
-      ops_net:
-
-  # ── Fail-safe 유도 에이전트 (정찰→HB누락→손실률→지연→간헐적)
-  dah-inducer:
-    profiles: ["cyber-lab"]
-    restart: "no"
-    build:
-      context: .
-      dockerfile: attack_agent/Dockerfile
-    container_name: dah-inducer
-    command: ["python", "failsafe_inducer.py"]
-    environment:
-      DASHBOARD_HOST: dah-dashboard
-      DASHBOARD_PORT: "14571"
-      ROUTER_HOST: dah-tactical-router
-    networks:
-      dah-net:
-        ipv4_address: 172.20.0.57
+        ipv4_address: 172.31.50.40
       ops_net:
 
   # ── 방어 에이전트 (탐지 + 차단)
   dah-defense:
-    profiles: ["cyber-lab"]
+    profiles: ["defense-lab"]
     restart: "no"
     build:
       context: .
@@ -271,7 +213,7 @@ services:
       ROUTER_HOST: dah-tactical-router
     networks:
       dah-net:
-        ipv4_address: 172.20.0.60
+        ipv4_address: 172.31.50.60
       ops_net:
 
   # ── API Gateway (nginx) — localhost:8080 단일 진입점
@@ -300,4 +242,4 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: 172.31.50.0/24
