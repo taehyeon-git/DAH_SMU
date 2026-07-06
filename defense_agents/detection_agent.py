@@ -215,6 +215,23 @@ class DefenseDetectionAgent:
             message = str(event.get("message", ""))
             source = str(event.get("source", ""))
             status = str(event.get("status", ""))
+            agent_type = str(event.get("agent_type", ""))
+            detail = str(event.get("detail", ""))
+            if (
+                status in {"EW_LINK_DEGRADED", "FAILSAFE_TRIGGERED", "FAILSAFE_LAND"}
+                or agent_type == "dah-jammer"
+                or "링크 저하" in message
+                or "EW_LINK_DEGRADATION_SIM" in detail
+            ):
+                self._emit_threat(
+                    scenario="EW_LINK_DEGRADATION",
+                    severity="HIGH" if status in {"EW_LINK_DEGRADED", "FAILSAFE_TRIGGERED", "FAILSAFE_LAND"} else "MEDIUM",
+                    confidence=0.86,
+                    reason="Dashboard agent event에서 전술 링크 저하/fail-safe 유도 이벤트 관측",
+                    evidence={"event": event},
+                    playbook="FREQ_HOP",
+                )
+                continue
             if "무결성" in message or "CRC_FAIL" in status or source in {"tamper", "Synthetic Protocol Integrity Monitor"}:
                 self._emit_threat(
                     scenario="PROTOCOL_FRAME_INTEGRITY",

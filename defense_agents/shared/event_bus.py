@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import time
 from queue import Queue
 from threading import Lock
@@ -17,6 +18,7 @@ class DashboardEventBus:
     def __init__(self) -> None:
         self.dashboard_host = os.getenv("DASHBOARD_HOST", "dah-dashboard")
         self.dashboard_port = int(os.getenv("DASHBOARD_PORT", "14571"))
+        self.stdout_events = os.getenv("DEFENSE_STDOUT_EVENTS", "true").lower() in {"1", "true", "yes", "on"}
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.timeline: list[TimelineEvent] = []
         self._lock = Lock()
@@ -43,6 +45,8 @@ class DashboardEventBus:
         with self._lock:
             self.timeline.append(TimelineEvent(local_time(), source, message, detail))
             self.timeline = self.timeline[-500:]
+        if self.stdout_events:
+            print(f"[DEFENSE][{status}][{source}] {message} :: {detail}", flush=True, file=sys.stdout)
         try:
             self._sock.sendto(json.dumps(event, ensure_ascii=False).encode("utf-8"), (self.dashboard_host, self.dashboard_port))
         except Exception:

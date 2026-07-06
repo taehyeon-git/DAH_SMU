@@ -33,6 +33,20 @@ class DefenseAgentsTests(unittest.TestCase):
         self.assertEqual(threat.recommended_playbook, "FREQ_HOP")
         self.assertGreaterEqual(threat.confidence, 0.8)
 
+    def test_detection_agent_emits_link_degradation_from_dashboard_event(self):
+        detector = DefenseDetectionAgent(self.context, self.ids)
+        detector._analyze_agent_events([{
+            "agent_type": "dah-jammer",
+            "source": "attack_chain",
+            "message": "UAV-001 전술 링크 저하 시뮬레이션",
+            "detail": "EW_LINK_DEGRADATION_SIM | channel=VHF",
+            "status": "EW_LINK_DEGRADED",
+        }])
+        threat = self.context.threat_queue.get_nowait()
+        self.assertEqual(threat.scenario, "EW_LINK_DEGRADATION")
+        self.assertEqual(threat.recommended_playbook, "FREQ_HOP")
+        self.assertGreaterEqual(threat.confidence, 0.8)
+
     def test_response_agent_selects_policy_playbooks(self):
         responder = DefenseResponseAgent(self.context, self.ids)
         threat = Threat(

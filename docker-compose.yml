@@ -205,7 +205,7 @@ services:
     restart: "no"
     build:
       context: .
-      dockerfile: defense_agent/Dockerfile
+      dockerfile: defense_agents/Dockerfile
     container_name: dah-defense
     command: ["python", "-m", "defense_agents.orchestrator"]
     environment:
