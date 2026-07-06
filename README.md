@@ -93,7 +93,7 @@ Dashboard / C2 Evidence
 | `tactical-router` | TMMR/TICN-like 링크 품질, 손실, 재밍 모사 | Router status, link event |
 | `mission-control` | Upper C2/BMS 역할 | 작전 상태 API |
 | `attack_agent` | Recon → Initial Access → Follow-up 체인 | attack plan, execution report |
-| `defense_agent` | 이상징후 탐지 및 대응 로직 | alert/block/recovery event |
+| `defense_agents` | Policy → Detection → Response → Recovery 4-Agent 방어 체계 | defense event, incident report, policy recommendation |
 
 ## 구현 범위
 
@@ -104,7 +104,7 @@ Dashboard / C2 Evidence
 | UAV/UGV 운용 | 상태 생성, 임무 수행, Telemetry 전송, Command 수신 모사 |
 | GCS/Mission Control | Telemetry 수신, Command 변환, Dashboard/Collector/Router fan-out |
 | Attack Agent | 정찰 결과 기반의 안전한 lab event와 alert 생성 |
-| Defense Agent | Telemetry, Command Flow, Network Event, Mission State 이상징후 탐지 |
+| Defense Agents | 예방 정책, 위협 탐지, 안전 playbook 대응, 복구/정책 개선 보고 |
 | Fail-safe 검증 | Heartbeat 이상, Link Quality 저하, Telemetry Gap 기반의 fail-safe 전환 가능성 확인 |
 
 ## 네트워크 구성
@@ -299,11 +299,23 @@ dah-gcs
 
 ### 방어 에이전트 통신
 
-`defense_agent/main.py`는 3개 스레드를 병렬 실행한다.
+방어 체계는 `defense_agents` 패키지의 4개 Agent가 담당한다.
 
-- `monitor()`: UDP :14551 MAVLink 감시 — 비정상 SYS_ID·Replay Attack 탐지
-- `jam_monitor()`: HTTP GET `/api/live` 3초 주기 폴링 — `loss_pct` 임계값(50%) 초과 시 FREQ-HOP 명령
-- `spoof_monitor()`: HTTP GET `/api/live` 3초 주기 폴링 — `gps_spoofed` 플래그 감지 시 INS 전환 명령
+```text
+DefensePolicyAgent
+  -> DefenseDetectionAgent
+  -> DefenseResponseAgent
+  -> DefenseRecoveryAgent
+```
+
+| Agent | 통신/입력 | 역할 |
+|---|---|---|
+| Policy | `defense_agents/policies/default_policy.json` | 정상 SYS_ID, 허용 명령, 노출 표면 정책 로드 |
+| Detection | UDP `14551`, Dashboard `/api/live`, Router `/api/ticn/status` | command injection, replay, GPS spoofing, jamming, fail-safe, protocol integrity 탐지 |
+| Response | Router API, lab UAV command port, Dashboard event | 사전 정의된 playbook만 실행 |
+| Recovery | Dashboard `/api/live`, output JSON | 복구 확인, 사고 보고서와 정책 개선안 생성 |
+
+자세한 구조는 [docs/defense_multi_agent_architecture.md](docs/defense_multi_agent_architecture.md)에 정리되어 있다.
 
 ---
 
@@ -337,6 +349,18 @@ python -m attack_agent.kill_chain --stage recon
 
 ```powershell
 python -m attack_agent.kill_chain --stage recon --skip-recon-collection
+```
+
+방어 4-Agent 체계는 `defense-lab` profile로 실행한다.
+
+```powershell
+docker compose --profile defense-lab up --build dah-defense
+```
+
+호스트에서 정책/보고서 생성 경로만 빠르게 점검하려면 아래 명령을 사용할 수 있다.
+
+```powershell
+python -m defense_agents.orchestrator --once
 ```
 
 ## Recon-driven 공격 체인

@@ -8,6 +8,11 @@ LISTEN_HOST = '0.0.0.0'    # 모든 IP에서 오는 패킷 수신
 LISTEN_PORT = 14550         # UAV 텔레메트리 포트 감시
 ALLOWED_SYS_ID = 1          # 정상 UAV SYS_ID (송골매)
 ALLOWED_GCS_ID = 255        # 정상 GCS SYS_ID
+ALLOWED_COMMANDS = {
+    mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+    mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+    mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+}
 
 # 탐지된 이상 패킷 저장소 (detector.py가 읽어감)
 alerts = []
@@ -49,6 +54,15 @@ def monitor():
                 }
                 alerts.append(alert)
                 print(f"[MONITOR] ⚠️  비정상 출처 탐지 → SYS_ID={src_id} (허용={ALLOWED_GCS_ID})")
+
+            if cmd not in ALLOWED_COMMANDS:
+                alerts.append({
+                    'type'   : 'UNKNOWN_COMMAND',
+                    'src_id' : src_id,
+                    'cmd'    : cmd,
+                    'seq'    : seq
+                })
+                print(f"[MONITOR] ⚠️  허용되지 않은 명령 탐지 → CMD={cmd}")
 
         # ── Replay Attack 탐지
         # 이전에 받은 SEQ보다 낮은 번호가 오면 재전송 공격 의심

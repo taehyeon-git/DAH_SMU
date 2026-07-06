@@ -207,10 +207,18 @@ services:
       context: .
       dockerfile: defense_agent/Dockerfile
     container_name: dah-defense
+    command: ["python", "-m", "defense_agents.orchestrator"]
     environment:
       DASHBOARD_HOST: dah-dashboard
       DASHBOARD_PORT: "14571"
       ROUTER_HOST: dah-tactical-router
+      ROUTER_PORT: "8080"
+      UAV_HOST: 172.31.50.10
+      UAV_PORT: "14551"
+      DEFENSE_POLICY_PATH: /app/defense_agents/policies/default_policy.json
+      DEFENSE_OUTPUT_DIR: /app/output
+    volumes:
+      - ./output:/app/output
     networks:
       dah-net:
         ipv4_address: 172.31.50.60

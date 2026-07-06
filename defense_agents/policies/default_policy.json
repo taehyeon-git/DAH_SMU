@@ -1,0 +1,57 @@
+{
+  "assets": {
+    "uav": {
+      "platform_id": "UAV-001",
+      "host": "172.31.50.10",
+      "cmd_port": 14551,
+      "sys_id": 1
+    },
+    "companion": {
+      "host": "172.31.50.30"
+    },
+    "gcs": {
+      "sys_id": 255
+    },
+    "defense": {
+      "host": "172.31.50.60"
+    },
+    "recon": {
+      "host": "172.31.50.40"
+    }
+  },
+  "allowed_sys_ids": [255],
+  "allowed_commands": [
+    "MAV_CMD_NAV_WAYPOINT",
+    "MAV_CMD_NAV_TAKEOFF",
+    "MAV_CMD_NAV_RETURN_TO_LAUNCH"
+  ],
+  "restricted_commands": [
+    "MAV_CMD_NAV_LAND",
+    "MAV_CMD_DO_SET_MODE"
+  ],
+  "thresholds": {
+    "replay_max_seq_backtrack": 0,
+    "jamming_loss_warn": 30,
+    "jamming_loss_critical": 50,
+    "gps_implied_speed_kmh": 300,
+    "heartbeat_gap_warn_s": 3,
+    "heartbeat_gap_critical_s": 5
+  },
+  "surfaces": {
+    "recon_mirror_default_allowed": false,
+    "router_api_external_allowed": false,
+    "attack_event_port_lab_only": true
+  },
+  "playbooks": {
+    "COMMAND_INJECTION": ["BLOCK_COMMAND", "FORCE_RTL"],
+    "FORCED_LAND_ATTEMPT": ["BLOCK_COMMAND", "FORCE_RTL"],
+    "UNKNOWN_COMMAND": ["BLOCK_COMMAND", "IGNORE_AND_MONITOR"],
+    "REPLAY_ATTACK": ["BLOCK_COMMAND", "SAFE_MODE"],
+    "GPS_SPOOFING": ["INS_FALLBACK", "HOLD_POSITION"],
+    "EW_LINK_DEGRADATION": ["IGNORE_AND_MONITOR"],
+    "JAMMING_CRITICAL": ["FREQ_HOP", "HOLD_POSITION"],
+    "FAILSAFE_INDUCTION": ["HOLD_POSITION", "FORCE_RTL"],
+    "PROTOCOL_FRAME_INTEGRITY": ["BLOCK_COMMAND", "IGNORE_AND_MONITOR"]
+  }
+}
+

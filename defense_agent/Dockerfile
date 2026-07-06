@@ -8,11 +8,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# defense_agent 파일 전부 복사
-COPY defense_agent/monitor.py .
-COPY defense_agent/detector.py .
-COPY defense_agent/responder.py .
-COPY defense_agent/main.py .
+# defense agent compatibility files and new four-agent package
+COPY defense_agent ./defense_agent
+COPY defense_agents ./defense_agents
 
-# 방어 에이전트 실행
-CMD ["python", "main.py"]
+# 방어 4-Agent orchestrator 실행
+CMD ["python", "-m", "defense_agents.orchestrator"]

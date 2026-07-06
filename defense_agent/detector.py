@@ -10,15 +10,12 @@ ALLOWED_CMDS    = [      # 허용된 명령 목록
     mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,  # 복귀
 ]
 
-# 탐지 결과 저장소 (responder.py가 읽어감)
-threats = []
-
-
 def detect(alerts):
     """
     monitor.py가 수집한 alerts 분석
     실제 위협인지 판단 후 threats에 저장
     """
+    threats = []
     for alert in alerts:
 
         # ── 규칙 1: 허용되지 않은 SYS_ID에서 명령 온 경우
@@ -34,7 +31,7 @@ def detect(alerts):
             threats.append(threat)
 
         # ── 규칙 2: 허용되지 않은 명령 종류
-        elif alert['type'] == 'UNKNOWN_SRC':
+        elif alert['type'] == 'UNKNOWN_COMMAND':
             if alert['cmd'] not in ALLOWED_CMDS:
                 print(f"[DETECTOR] 위협 탐지 — 허용되지 않은 명령")
                 print(f"[DETECTOR] 명령={alert['cmd']}")
