@@ -14,7 +14,7 @@ app = Flask(__name__)
 MISSION_CONTROL_URL   = os.getenv("MISSION_CONTROL_URL", "http://mission-control:8080")
 GCS_URL               = os.getenv("GCS_URL",            "http://dah-gcs:8080")
 GCS_TELEMETRY_PORT    = int(os.getenv("ROUTER_TELEMETRY_PORT", "14571"))
-UAV_HOST              = os.getenv("UAV_HOST",     "172.20.0.10")
+UAV_HOST              = os.getenv("UAV_HOST",     "172.31.50.10")
 UAV_CMD_PORT          = int(os.getenv("UAV_CMD_PORT", "14551"))
 GCS_SYS_ID            = 255  # 정상 GCS SYS_ID
 
@@ -22,6 +22,18 @@ GCS_SYS_ID            = 255  # 정상 GCS SYS_ID
 router_platforms: dict = {}
 local_events: deque  = deque(maxlen=100)
 agent_events: deque  = deque(maxlen=300)
+mission_alert_until = 0.0
+failsafe_sim: dict = {
+    "active": False,
+    "vehicle_id": None,
+    "action": None,
+    "lat": None,
+    "lon": None,
+    "start_alt": None,
+    "started_at": None,
+    "descent_rate_mps": 25.0,
+    "source": None,
+}
 
 # 임무 상태 (C2 명령 기반)
 mission_state: dict = {
@@ -32,6 +44,212 @@ mission_state: dict = {
     "cmd_at":  None,
     "cmd_by":  "SYSTEM",
 }
+
+
+def is_mission_alert_active():
+    return time.time() < mission_alert_until
+
+
+def update_mission_state(update: dict, alert_hold_sec: int = 0):
+    global mission_alert_until
+    mission_state.update(update)
+    if alert_hold_sec > 0:
+        mission_alert_until = time.time() + alert_hold_sec
+
+
+def is_failsafe_sim_active():
+    return bool(failsafe_sim.get("active"))
+
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _latest_vehicle_state(vehicle_id: str) -> dict:
+    return router_platforms.get(vehicle_id, {})
+
+
+def activate_failsafe_sim(vehicle_id: str, action: str = "LAND", source: str = "attack_chain"):
+    """Dashboard-local safe simulation: freeze position and descend without sending flight commands."""
+    current = _latest_vehicle_state(vehicle_id)
+    current_alt = _as_float(current.get("alt", current.get("relative_alt")), 0.0)
+    visible_start_alt = max(current_alt, 120.0)
+
+    failsafe_sim.update({
+        "active": True,
+        "vehicle_id": vehicle_id,
+        "action": action,
+        "lat": current.get("lat"),
+        "lon": current.get("lon"),
+        "start_alt": visible_start_alt,
+        "started_at": time.time(),
+        "descent_rate_mps": 25.0,
+        "source": source,
+    })
+
+
+def _failsafe_altitude():
+    if not is_failsafe_sim_active():
+        return None
+    started_at = _as_float(failsafe_sim.get("started_at"), time.time())
+    elapsed = max(0.0, time.time() - started_at)
+    start_alt = _as_float(failsafe_sim.get("start_alt"), 0.0)
+    descent_rate = _as_float(failsafe_sim.get("descent_rate_mps"), 25.0)
+    return max(0.0, start_alt - (elapsed * descent_rate))
+
+
+def current_failsafe_snapshot():
+    altitude = _failsafe_altitude()
+    if altitude is None:
+        return {"active": False}
+
+    landed = altitude <= 0.0
+    return {
+        **failsafe_sim,
+        "alt": round(altitude, 2),
+        "mode": "FAILSAFE_LANDED" if landed else "FAILSAFE_LAND",
+        "status": "LANDED" if landed else "FAILSAFE_TRIGGERED",
+        "mission_state": "FAILSAFE_LANDED" if landed else "FAILSAFE_LAND",
+        "simulated_only": True,
+        "scope": "LOCAL_DOCKER_TESTBED_ONLY",
+    }
+
+
+def _sync_failsafe_mission_state(altitude: float):
+    if altitude <= 0.0 and mission_state.get("phase") != "FAILSAFE_LANDED":
+        update_mission_state({
+            "phase": "FAILSAFE_LANDED",
+            "desc": "Fail-safe 시뮬레이션 완료: UAV가 현재 위치에서 지면에 도달",
+            "advice": "임무 중단 상태 유지, 원인 분석 및 복구 절차 전까지 재출격 금지",
+            "cmd": "FAILSAFE_LANDED",
+            "cmd_at": time.strftime("%H:%M:%S"),
+            "cmd_by": "Safe Follow-up Simulation Module",
+        }, alert_hold_sec=60)
+
+
+def apply_failsafe_simulation(platforms: list[dict]) -> list[dict]:
+    """Overlay a safe fail-safe result on live telemetry without mutating the real UAV link."""
+    if not is_failsafe_sim_active():
+        return platforms
+
+    vehicle_id = failsafe_sim.get("vehicle_id") or "UAV-001"
+    altitude = _failsafe_altitude()
+    if altitude is None:
+        return platforms
+
+    _sync_failsafe_mission_state(altitude)
+    landed = altitude <= 0.0
+    mode = "FAILSAFE_LANDED" if landed else "FAILSAFE_LAND"
+    status = "LANDED" if landed else "FAILSAFE_TRIGGERED"
+    updated = []
+    found = False
+
+    for platform in platforms:
+        if platform.get("platform_id") != vehicle_id:
+            updated.append(platform)
+            continue
+
+        found = True
+        if failsafe_sim.get("lat") is None:
+            failsafe_sim["lat"] = platform.get("lat")
+        if failsafe_sim.get("lon") is None:
+            failsafe_sim["lon"] = platform.get("lon")
+
+        updated.append({
+            **platform,
+            "lat": failsafe_sim.get("lat"),
+            "lon": failsafe_sim.get("lon"),
+            "alt": round(altitude, 2),
+            "speed": 0,
+            "mode": mode,
+            "status": status,
+            "mission": "FAILSAFE_STOPPED",
+            "failsafe_active": True,
+            "failsafe_action": "LAND",
+            "simulated_only": True,
+            "source": f"{platform.get('source', 'telemetry')}/failsafe_sim",
+        })
+
+    if not found:
+        updated.append({
+            "platform_id": vehicle_id,
+            "platform_type": "UAV",
+            "lat": failsafe_sim.get("lat"),
+            "lon": failsafe_sim.get("lon"),
+            "alt": round(altitude, 2),
+            "speed": 0,
+            "mode": mode,
+            "status": status,
+            "mission": "FAILSAFE_STOPPED",
+            "failsafe_active": True,
+            "failsafe_action": "LAND",
+            "simulated_only": True,
+            "source": "failsafe_sim",
+        })
+
+    return updated
+
+
+def record_agent_event(payload: dict):
+    message_type = payload.get("message_type", "")
+    severity = payload.get("severity", payload.get("level", "info"))
+    status = payload.get("integrity_status", payload.get("status", "INFO"))
+    mutation = payload.get("frame_mutation_mode", "")
+    vehicle_id = payload.get("vehicle_id", payload.get("target", ""))
+
+    if message_type == "protocol_integrity_alert":
+        message = f"{vehicle_id} 프로토콜 무결성 경고: {status}"
+        detail = f"{mutation} | evidence={payload.get('evidence', {})}"
+        level = "warn" if severity in {"HIGH", "MEDIUM"} else "info"
+        update_mission_state({
+            "phase": "INTEGRITY_ALERT",
+            "desc": "프로토콜 프레임 무결성 이상 탐지",
+            "advice": "해당 링크 격리 검토, 프레임 검증 로그 확인, 제어 명령 신뢰성 재검증",
+            "cmd": status,
+            "cmd_at": time.strftime("%H:%M:%S"),
+            "cmd_by": "Synthetic Protocol Integrity Monitor",
+        }, alert_hold_sec=60)
+    elif message_type == "link_degradation_alert":
+        vehicle_id = vehicle_id or "UAV-001"
+        activate_failsafe_sim(vehicle_id, action="LAND", source=payload.get("source", "attack_chain"))
+        message = payload.get("message", f"{vehicle_id or '전술 링크'} 링크 저하 시뮬레이션")
+        raw_detail = payload.get("detail", f"evidence={payload.get('evidence', {})}")
+        detail = f"{raw_detail} | fail-safe LAND overlay activated"
+        level = "warn" if severity in {"HIGH", "MEDIUM"} else "info"
+        update_mission_state({
+            "phase": "FAILSAFE_LAND",
+            "desc": "Fail-safe 유도 성공: 현재 위치 정지 후 비상 하강 시뮬레이션",
+            "advice": "임무 진행 중단, 위치 고정 및 고도 하강 상태 확인",
+            "cmd": "FAILSAFE_TRIGGERED",
+            "cmd_at": time.strftime("%H:%M:%S"),
+            "cmd_by": "Safe Follow-up Simulation Module",
+        }, alert_hold_sec=60)
+    else:
+        message = payload.get("message", "agent event")
+        detail = payload.get("detail", "")
+        level = payload.get("level", "info")
+
+    agent_events.appendleft({
+        "time": payload.get("time", time.strftime("%H:%M:%S")),
+        "level": level,
+        "agent_type": payload.get("agent_type", message_type or "agent"),
+        "source": payload.get("source", "attack_chain"),
+        "message": message,
+        "detail": detail,
+        "status": status,
+    })
+
+    local_events.appendleft({
+        "type": "attack",
+        "time": time.strftime("%H:%M:%S"),
+        "level": level,
+        "source": payload.get("source", "attack_chain"),
+        "message": message,
+        "status": status,
+    })
 
 PHASE_MAP = {
     "HOLD":    {"phase": "LOITER",     "desc": "지정 구역 선회 대기",       "advice": "현재 좌표 유지, 추가 명령 대기"},
@@ -114,14 +332,15 @@ def _router_udp_listener():
                         },
                     }
 
-                mission_state.update({
-                    "phase":  "LOITER",
-                    "desc":   "통신 두절로 제자리 배회",
-                    "advice": "현재 좌표 유지, 전술 링크 복구 대기",
-                    "cmd":    "COMMS_LOST",
-                    "cmd_at": payload.get("time", time.strftime("%H:%M:%S")),
-                    "cmd_by": "TICN/TMMR",
-                })
+                if not is_mission_alert_active() and not is_failsafe_sim_active():
+                    update_mission_state({
+                        "phase":  "LOITER",
+                        "desc":   "통신 두절로 제자리 배회",
+                        "advice": "현재 좌표 유지, 전술 링크 복구 대기",
+                        "cmd":    "COMMS_LOST",
+                        "cmd_at": payload.get("time", time.strftime("%H:%M:%S")),
+                        "cmd_by": "TICN/TMMR",
+                    })
                 continue
 
             router_platforms[pid] = {**payload, "gcs_received_at": time.time()}
@@ -206,7 +425,7 @@ TOPOLOGY = {
             "label": "dah-uav",
             "role": "송골매 UAV 시뮬레이터",
             "status": "implemented",
-            "ip": "172.20.0.10",
+            "ip": "172.31.50.10",
             "group": "vehicle",
         },
         {
@@ -251,16 +470,7 @@ TOPOLOGY = {
             "label": "dah-recon",
             "role": "텔레메트리 도청/분석",
             "status": "implemented",
-            "ip": "172.20.0.40",
-            "group": "attack",
-        },
-        {
-            "id": "executor",
-            "name": "Executor",
-            "label": "dah-executor",
-            "role": "COMMAND_LONG LAND 주입",
-            "status": "implemented",
-            "ip": "172.20.0.50",
+            "ip": "172.31.50.40",
             "group": "attack",
         },
         {
@@ -269,7 +479,7 @@ TOPOLOGY = {
             "label": "dah-defense",
             "role": "비정상 명령 탐지/대응",
             "status": "implemented",
-            "ip": "172.20.0.60",
+            "ip": "172.31.50.60",
             "group": "defense",
         },
         {
@@ -278,7 +488,7 @@ TOPOLOGY = {
             "label": "dah-dashboard",
             "role": "통신 구조 시각화",
             "status": "implemented",
-            "ip": "172.20.0.70",
+            "ip": "172.31.50.70",
             "group": "ops",
         },
     ],
@@ -404,7 +614,7 @@ def send_command():
 
     # 임무 상태 업데이트
     if cmd in PHASE_MAP:
-        mission_state.update(PHASE_MAP[cmd])
+        update_mission_state(PHASE_MAP[cmd])
         mission_state["cmd"]    = cmd
         mission_state["cmd_at"] = time.strftime("%H:%M:%S")
         mission_state["cmd_by"] = "C2/GCS"
@@ -454,8 +664,10 @@ def live():
         return jsonify({
             "status": "degraded",
             "message": "GCS / Upper C2 unavailable (direct UDP only)",
-            "platforms": list(router_platforms.values()),
+            "platforms": apply_failsafe_simulation(list(router_platforms.values())),
             "events": [],
+            "mission_state": mission_state,
+            "failsafe_simulation": current_failsafe_snapshot(),
         })
     # 플랫폼: GCS + UDP 직수신 병합 (UDP 직수신 우선)
     mc_platforms = {p["platform_id"]: p for p in dashboard.get("platforms", [])}
@@ -465,15 +677,17 @@ def live():
     gcs_events = dashboard.get("events", [])
     merged_events = list(gcs_events) + list(local_events)
     merged_events.sort(key=lambda e: e.get("time", ""), reverse=True)
+    platform_list = apply_failsafe_simulation(list(merged.values()))
 
     return jsonify({
         "status": "ok",
         **dashboard,
-        "platforms":     list(merged.values()),
+        "platforms":     platform_list,
         "events":        merged_events[:50],
         "agent_events":  list(agent_events)[:100],
         "gcs_direct":    len(router_platforms),
         "mission_state": mission_state,
+        "failsafe_simulation": current_failsafe_snapshot(),
     })
 
 
@@ -502,6 +716,13 @@ def failsafe_policy():
         "rtb_on_prolonged": True,
         "loiter_restore_ticks": 3,
     })
+
+
+@app.post("/api/agent-event")
+def ingest_agent_event():
+    payload = request.get_json(force=True, silent=True) or {}
+    record_agent_event(payload)
+    return jsonify({"ok": True, "agent_events": len(agent_events)})
 
 
 @app.get("/health")

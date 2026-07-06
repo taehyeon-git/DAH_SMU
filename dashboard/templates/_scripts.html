@@ -767,7 +767,7 @@
       if (phaseEl) {
         phaseEl.textContent = ms.phase || 'EN_ROUTE';
         // 위험 상태 색상
-        phaseEl.style.color = ['LANDING','RTB','LOITER','COMMS_LOST'].includes(ms.phase)
+        phaseEl.style.color = ['LANDING','RTB','LOITER','COMMS_LOST','INTEGRITY_ALERT','EW_LINK_DEGRADED','FAILSAFE_LAND','FAILSAFE_LANDED','FAILSAFE_LOITER'].includes(ms.phase)
           ? '#ef4444' : ms.phase === 'PAUSED' ? '#f59e0b' : '';
       }
       if (el('msn-desc'))   el('msn-desc').textContent   = ms.desc   || '--';

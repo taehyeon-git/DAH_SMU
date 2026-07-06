@@ -1,8 +1,10 @@
 import time
 from pymavlink import mavutil
 
-UAV_HOST   = '172.20.0.10'
-UAV_PORT   = 14551
+import os
+
+UAV_HOST   = os.getenv("UAV_HOST", "172.31.50.10")
+UAV_PORT   = int(os.getenv("UAV_PORT", "14551"))
 GCS_SYS_ID = 255
 
 
