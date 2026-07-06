@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import unittest
 
-from attack_agent.agents.recon_agent import ReconAgent
+from attack_agent.recon import ReconAgent
 from attack_agent.core.io import write_json
 from attack_agent.core.config import map_lab_host
 from attack_agent.core.safety import SafetyError, validate_target

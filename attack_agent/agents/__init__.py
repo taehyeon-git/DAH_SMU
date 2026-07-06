@@ -2,6 +2,6 @@
 
 from .followup_attack_agent import FollowUpAttackAgent
 from .initial_access_agent import InitialAccessAgent
-from .recon_agent import ReconAgent
+from attack_agent.recon import ReconAgent
 
 __all__ = ["ReconAgent", "InitialAccessAgent", "FollowUpAttackAgent"]
