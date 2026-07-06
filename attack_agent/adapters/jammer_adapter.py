@@ -16,7 +16,10 @@ class JammerAdapter(AgentAdapter):
     name = "dah-jammer"
 
     def supports(self, step: AttackStep) -> bool:
-        return step.agent == self.name or step.action_type == "EW_LINK_DEGRADATION_SIM"
+        return step.agent == self.name or step.action_type in {
+            "EW_LINK_DEGRADATION_SIM",       # B-1
+            "EW_STEALTH_DEGRADATION_SIM",    # B-2 (은신 변형)
+        }
 
     def build_command(self, step: AttackStep, intel: IntelDocument) -> dict[str, Any]:
         params = step.params
@@ -34,7 +37,8 @@ class JammerAdapter(AgentAdapter):
         assert_lab_only_action(host, port, "udp", execute=True)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sent = 0
-        for event in cmd["events"][:1]:
+        # 전 채널 전송 — TMMR 자동 홉을 뚫으려면 VHF+UHF+HF 동시 재밍(blackout) 필요
+        for event in cmd["events"]:
             sock.sendto(json.dumps(event).encode(), (host, port))
             sent += 1
         dashboard_result = self._report_dashboard_event(step, cmd, sent)
