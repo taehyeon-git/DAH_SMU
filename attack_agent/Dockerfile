@@ -10,8 +10,6 @@ RUN pip install -r requirements.txt
 
 # 공격 에이전트 전체 복사
 COPY attack_agent ./attack_agent
-COPY attack_agent/mavlink_parser.py .
-COPY attack_agent/recon.py .
 
-# 기본 실행은 recon.py (argparse로 파라미터 수신)
-CMD ["python", "recon.py"]
+# 기본 실행은 패키지 모듈 엔트리포인트
+CMD ["python", "-m", "attack_agent.recon"]

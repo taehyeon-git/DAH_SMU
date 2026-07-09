@@ -23,6 +23,7 @@ app = Flask(__name__)
 platforms: dict = {}
 events = deque(maxlen=80)
 _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_airborne: dict = {}   # platform_id → 이륙 완료 여부 (alt > 300m 도달 후 True)
 
 
 def add_event(level: str, source: str, message: str,
@@ -63,9 +64,15 @@ def evaluate_situation(payload: dict):
     fuel = payload.get("fuel")
     alt  = payload.get("alt")
 
-    if fuel is not None and fuel < 15:
+    # 이륙 완료 추적 (300m 이상 도달 시 airborne 확정)
+    if alt is not None and alt > 300:
+        _airborne[pid] = True
+
+    # fuel=-1 은 연료 미지원 sentinel 값 → 무시
+    if fuel is not None and fuel >= 0 and fuel < 15:
         issue_order("RTB", pid, f"연료 임계치 미만 ({fuel}%)")
-    elif alt is not None and alt < 50:
+    # 이륙 완료 후 저고도 진입 시에만 RTB (이륙 중 오발 방지)
+    elif alt is not None and alt < 50 and _airborne.get(pid):
         issue_order("RTB", pid, f"저고도 경보 ({alt}m)")
 
 

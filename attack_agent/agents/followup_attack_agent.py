@@ -62,10 +62,6 @@ def _reset_dashboard_failsafe() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
-def _mission_phase(snapshot: dict[str, Any]) -> str:
-    return str((snapshot.get("mission_state") or {}).get("phase") or "")
-
-
 def _uav(snapshot: dict[str, Any]) -> dict[str, Any]:
     for platform in snapshot.get("platforms", []) or []:
         if platform.get("platform_id") == "UAV-001":

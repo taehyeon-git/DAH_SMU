@@ -46,7 +46,7 @@
   </div>
 
   <!-- 통신 링크 상태 + TICN/TMMR 시각화 -->
-  <div class="card" style="display:flex;flex-direction:column;gap:10px;min-height:0">
+  <div class="card link-status-card">
 
     <!-- 링크 상태 테이블 (컴팩트) -->
     <div>
@@ -102,9 +102,9 @@
     <div style="height:1px;background:#edf0f5;flex-shrink:0"></div>
 
     <!-- TMMR 신호 시각화 -->
-    <div>
+    <div class="link-visual-section">
       <div class="card-title" style="margin-bottom:8px;font-size:11px">TMMR 무선링크</div>
-      <div style="display:flex;gap:10px;align-items:flex-start">
+      <div class="tmmr-grid">
 
         <!-- RSSI 미터 -->
         <div class="ticn-meter-wrap">
@@ -116,7 +116,7 @@
         </div>
 
         <!-- 파형 -->
-        <div class="ticn-meter-wrap" style="flex:1">
+        <div class="ticn-meter-wrap tmmr-waveform">
           <div class="ticn-meter-label">파형 (Waveform)</div>
           <div style="margin-top:4px">
             <span class="badge b-mav" id="tmmr-wf-badge" style="font-size:11px;padding:3px 8px">--</span>
@@ -131,12 +131,12 @@
     <div style="height:1px;background:#edf0f5;flex-shrink:0"></div>
 
     <!-- TICN 링크 시각화 -->
-    <div>
+    <div class="link-visual-section">
       <div class="card-title" style="margin-bottom:8px;font-size:11px">TICN 전술망</div>
-      <div style="display:flex;gap:10px">
+      <div class="ticn-bar-grid">
 
         <!-- 링크 품질 게이지 -->
-        <div class="ticn-meter-wrap" style="flex:1">
+        <div class="ticn-meter-wrap">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <div class="ticn-meter-label">링크 품질 (LQ)</div>
             <div class="ticn-meter-val" id="ticn-lq-val">-- / 100</div>
@@ -147,7 +147,7 @@
         </div>
 
         <!-- 패킷 손실률 -->
-        <div class="ticn-meter-wrap" style="flex:1">
+        <div class="ticn-meter-wrap">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <div class="ticn-meter-label">패킷 손실</div>
             <div class="ticn-meter-val" id="ticn-loss-val">-- %</div>

@@ -38,6 +38,30 @@ class TMMRNode:
     def spec(self) -> dict:
         return WaveformSpec.TABLE.get(self.waveform, WaveformSpec.TABLE['K-WNW/VHF'])
 
+    def adapt_waveform_for_distance(self, dist_km: float, jammed: set[str], log_fn) -> bool:
+        """거리 기반 파형 선택. 재밍이 없으면 운용 거리 안에 들어오는 최단 파형을 사용."""
+        if self.jam_detected or self.blackout:
+            return False
+
+        candidates = [
+            waveform for waveform in WaveformSpec.PRIORITY
+            if waveform.split('/')[-1] not in jammed
+            and dist_km <= WaveformSpec.TABLE[waveform]['max_range_km'] * 1.05
+        ]
+        desired = candidates[0] if candidates else WaveformSpec.PRIORITY[-1]
+        if desired == self.waveform:
+            return False
+
+        old = self.waveform
+        self.waveform = desired
+        self._rssi_hist.clear()
+        self.hop_count += 1
+        log_fn({"layer": "TMMR", "event": "WAVEFORM_DISTANCE_ADAPT",
+                "platform": self.platform_id, "from": old, "to": self.waveform,
+                "reason": "DISTANCE_RANGE_FIT", "dist_km": round(dist_km, 2)})
+        print(f"[TMMR] RANGE  {self.platform_id}: {old} -> {self.waveform}  dist={dist_km:.1f}km")
+        return True
+
     def update_rssi(self, dist_km: float, alt_m: float, jammed: set[str]) -> float:
         """거리·고도 기반 RSSI 계산. 재밍 채널이면 잡음 신호 추가."""
         freq_mhz = 400 if self.channel == 'UHF' else (60 if self.channel == 'VHF' else 10)
@@ -59,15 +83,6 @@ class TMMRNode:
         """재밍 감지 시 자동 파형 전환. 재밍 해제 시 K-WNW/VHF 복귀."""
         if not self.jam_detected:
             self.blackout = False
-            if self.waveform != 'K-WNW/VHF' and 'VHF' not in jammed:
-                old = self.waveform
-                self.waveform = 'K-WNW/VHF'
-                self._rssi_hist.clear()
-                self.hop_count += 1
-                log_fn({"layer": "TMMR", "event": "WAVEFORM_RESTORE",
-                        "platform": self.platform_id, "from": old, "to": self.waveform,
-                        "reason": "JAM_CLEARED"})
-                print(f"[TMMR] ✅ RESTORE  {self.platform_id}: {old} → {self.waveform}")
             return False
 
         candidates = [w for w in WaveformSpec.PRIORITY

@@ -205,6 +205,7 @@ def main():
 
             # TMMR 레이어 시뮬레이션
             jammed = shared.active_jammed()
+            tmmr.adapt_waveform_for_distance(dist_km, jammed, lambda ev: (shared.log(ev), ticn.log(ev)))
             tmmr.update_rssi(dist_km, alt, jammed)
             tmmr.auto_hop(jammed, lambda ev: (shared.log(ev), ticn.log(ev)))
             tmmr.adjust_tx_power(dist_km)

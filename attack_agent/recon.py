@@ -28,7 +28,7 @@ from typing import Any
 
 try:
     from .mavlink_parser import ParsedMavlinkFrame, parse_datagram
-except ImportError:  # Standalone container entrypoint: python recon.py
+except ImportError:  # Direct script entrypoint fallback
     from mavlink_parser import ParsedMavlinkFrame, parse_datagram
 
 from attack_agent.core.config import running_inside_docker

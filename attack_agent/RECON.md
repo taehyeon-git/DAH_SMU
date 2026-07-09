@@ -1,517 +1,227 @@
-# Passive MAVLink Recon — 수동 정찰 시나리오
+# Passive MAVLink Recon
 
-> **시나리오 코드**: S11-RECON  
-> **분류**: 저권한 수동 정찰 (Low-Privilege Passive Reconnaissance)  
-> **보안 제약**: 실제 군 장비 미연결 · raw socket 없음 · 패킷 주입 없음
+> `S11-RECON` · 저권한 수동 정찰 · DAH Docker 폐쇄 실험망 전용
 
----
+`ReconAgent`는 UAV/UGV 통신망에서 MAVLink mirror와 Dashboard 상태값을 수집해 공격/방어 에이전트가 함께 쓰는 정찰 인텔리전스를 만든다. 실제 군 장비, 실제 RF, 외부 네트워크는 사용하지 않는다.
 
-## 1. 개요
-
-**Passive MAVLink Recon**은 dah-net(`172.31.50.0/24`) 안에서 Companion Computer가 복제한 MAVLink mirror를 수동으로 청취하여, InitialAccessAgent가 사용할 정찰 신호를 구조화하는 인텔리전스 수집 모듈이다.
-
-### 핵심 특성
+이 문서는 다음 세 가지를 설명한다.
 
 | 항목 | 내용 |
 |---|---|
-| 대상 자산 | UAV-001 (SYS_ID=1, 172.31.50.10) |
-| 청취 포트 | UDP 14550 (Companion mirror) |
-| 권한 | 일반 UDP bind (CAP_NET_RAW 불필요) |
-| GCS 흔적 | Phase 0에서 HTTP 2회 / Phase 1 이후 완전 수동 |
-| 출력 | `passive_mavlink_intel.json` + `intel_handoff.json` |
+| 공격 시나리오 근거 | MAVLink 무서명 트래픽, heartbeat/status, command ack, TMMR/TICN 링크 품질 |
+| AI Agent 구조 | `ReconAgent -> InitialAccessAgent -> FollowUpAttackAgent` |
+| 방어 연계 | `DefensePolicyAgent -> Detection -> Response -> Recovery` |
 
 ---
 
-## 2. 네트워크 토폴로지
-
-```
-  dah-net (172.31.50.0/24)
-  ┌───────────────────────────────────────────────────────────┐
-  │                                                           │
-  │  172.31.50.10  dah-uav        ─── MAVLink UDP :14550 ───► │
-  │                (송골매 UAV)                                │
-  │                                      ▼                     │
-  │  172.31.50.30  dah-companion  ─── mirror copy ───────────► │
-  │  172.31.50.40  dah-recon       UDP :14550 수동 청취         │
-  │  172.31.50.70  dah-dashboard                              │
-  └───────────────────────────────────────────────────────────┘
-
-  ops_net
-  ┌──────────────────────────────────────────┐
-  │  dah-dashboard :8080   /api/live        │  ◄── Phase 0 HTTP
-  │  dah-dashboard :8080   /api/failsafe    │  ◄── Phase 0 HTTP
-  │  dah-dashboard :14571  UDP 이벤트 수신  │  ◄── 실시간 이벤트 전송
-  └──────────────────────────────────────────┘
-```
-
-**왜 Companion Computer와 충돌이 없는가?**  
-정찰기는 실제 C2 경로에 끼어들지 않는다. `dah-companion`이 수신한 MAVLink 원본 바이트를 `dah-recon:14550`으로 복제할 뿐이며, 정찰 컨테이너가 꺼져 있어도 UAV → Companion → GCS 경로는 유지된다.
-
----
-
-## 3. 6단계 파이프라인
-
-```
-Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
-API 정찰    UDP 청취   신뢰도 채점  재검증(LOW)  정찰 태그 생성  결과 저장
-(~5s)      (기본 30s) (즉시)       (20s/생략)   (즉시)        (즉시)
-```
-
-### Phase 0 — Dashboard API 사전 정찰
-
-```
-GET http://dah-dashboard:8080/api/live      → UAV 현재 상태
-GET http://dah-dashboard:8080/api/failsafe  → Fail-safe 정책값
-```
-
-수집 항목:
-
-| 항목 | 활용 |
-|---|---|
-| UAV 고도/모드/연료 | 현재 운용 상태와 실행 전후 비교 기준 |
-| TICN 손실률/링크 품질 | `EW_LINK_DEGRADATION_SIM` 선택 및 효과 확인 근거 |
-| HB timeout / max_miss | fail-safe 정책값 확인 |
-| loss critical % / latency critical ms | 링크 저하/지연 임계값 확인 |
-| failsafe_action | 대시보드 fail-safe 상태 해석 기준 |
-
-> **주의**: HTTP 요청 2회가 Dashboard → GCS 경로에 로그로 남을 수 있다.  
-> `--skip-phase0` 플래그 사용 시 완전 수동 모드로 전환된다.
-
----
-
-### Phase 1 — 수동 MAVLink 청취 (기본 30s)
-
-UDP 소켓으로 `0.0.0.0:14550`에 바인딩 후 `dah-companion`이 복제한 MAVLink mirror 패킷을 수신한다.  
-GCS HTTP 요청 없음 — 감사 로그 흔적 없음.
-
-**수신 메시지 종류:**
-
-| MAVLink 메시지 | MSG_ID | 추출 정보 |
-|---|---|---|
-| `HEARTBEAT` | 0 | mav_type, 시스템 상태, 무장 여부, 유도 여부 |
-| `SYS_STATUS` | 1 | 배터리%, 패킷 손실률, 통신 오류 수 |
-| `GLOBAL_POSITION_INT` | 33 | 위도·경도·고도·속도·방위각 |
-| `COMMAND_LONG` | 76 | 명령 종류·대상 시스템 (GCS→UAV 명령 도청) |
-| `COMMAND_ACK` | 77 | 명령 결과 (수락/거부/진행중) |
-| `MISSION_CURRENT` | 42 | 현재 웨이포인트 번호 |
-| `MISSION_COUNT` | 44 | 미션 항목 수 (업로드 감지) |
-
-**MAVLink v2 프레임 구조 파싱:**
-
-```
-[STX=0xFD][LEN][INCOMPAT][COMPAT][SEQ][SYS_ID][COMP_ID][MSG_ID×3B][PAYLOAD][CRC16][SIG×13B]
-```
-
-- `INCOMPAT_FLAGS & 0x01` = 서명 있음
-- CRC는 x25 알고리즘 + CRC_EXTRA 로 검증
-- 서명 있어도 payload는 평문 → 기밀성 미제공
-
----
-
-### Phase 2 — 신뢰도 채점 (6개 팩터)
-
-6개 팩터를 합산하여 0.00~1.00 점수를 산출한다.
-
-| 팩터 | 가중치 | 충족 조건 |
-|---|---|---|
-| `message_repetition` | 0.20 | 수신 패킷 수 ≥ 3 |
-| `position_repetition` | 0.15 | 위치 샘플 수 ≥ 2 |
-| `physical_consistency` | 0.25 | 계산 속도 vs 보고 속도 비율 < 4.0 |
-| `cross_message_validation` | 0.15 | 무장+고도 모순 없음, ACTIVE+위치 일치 |
-| `frame_integrity` | 0.15 | CRC 유효 프레임 존재 (invalid=0.00, unknown=0.08) |
-| `freshness` | 0.10 | 마지막 수신 ≤ 90초 이내 |
-| **합계** | **1.00** | |
-
-**임계값:**
-
-```
-HIGH   ≥ 0.80  → 정찰 신뢰도 높음
-MEDIUM  0.50~0.79 → 재검증 권고
-LOW    < 0.50  → 지연/스푸핑/불완전 관측 가능성
-```
-
-**physical_consistency 상세:**
-
-```python
-# 위치 히스토리 2개 이상 수집 후
-calculated_speed = distance(pos[-2], pos[-1]) / delta_t
-reported_speed   = GLOBAL_POSITION_INT.vx² + vy² 합 (cm/s → m/s)
-
-# 송골매 (600km/h = ~167m/s) 기준 비율 허용치 4.0
-ratio = max(calc, rep) / min(calc, rep)
-ok    = ratio < 4.0
-```
-
----
-
-### Phase 3 — 단기 재검증 (LOW 자산만)
-
-신뢰도 < HIGH인 자산이 있을 경우 ReconAgent의 `--recon-revalidate-s`(기본 20s)만큼  
-추가 청취 후 더 나은 관측값으로 병합한다.
-
-```
-전 자산 HIGH → "재검증 생략" 메시지 출력 후 Phase 4로 진행
-LOW 자산 있음 → 추가 20s 청취 → score 개선 시 덮어쓰기
-```
-
----
-
-### Phase 4 — 정찰 태그 / 분석 힌트 생성
-
-ReconAgent는 이 단계에서 실행 가능한 후속 모듈을 고르지 않는다.  
-대신 InitialAccessAgent가 판단할 수 있도록 `recon_tags`와 `analysis_hints`를 만든다.
-
-**생성되는 대표 태그:**
-
-| 태그 | 의미 | 다음 단계 활용 |
-|---|---|---|
-| `CONFIDENCE_HIGH`, `CONFIDENCE_MEDIUM`, `CONFIDENCE_LOW` | 정찰 신뢰도 | 후보 생성 여부와 confidence 계산 |
-| `PATTERN_*` | 비행 패턴 분류 결과 | 공격 그래프 설명과 타이밍 근거 |
-| `API_BASELINE_AVAILABLE` | `/api/live`, `/api/failsafe` 기준값 확보 | 프로토콜/대시보드 경고 경로 검증 근거 |
-| `LINK_METRICS_AVAILABLE` | TICN 손실률/링크 품질 관측 | `EW_LINK_DEGRADATION_SIM` 후보 생성 근거 |
-| `PROTOCOL_FRAME_METADATA_AVAILABLE` | CRC/서명/프레임 메타데이터 관측 | `PROTOCOL_FRAME_INTEGRITY_SIM` 후보 생성 근거 |
-| `FAILSAFE_POLICY_OBSERVED` | fail-safe 정책 확인 | fail-safe 결과 해석 근거 |
-
-후속 모듈 후보 생성은 다음 단계인 `InitialAccessAgent`가 담당한다.
-
-**행동 패턴 분류 (DAH_SMU 맞춤):**
-
-현재 구현에서 행동 패턴은 "어떤 모듈을 실행할지"를 ReconAgent가 단독 결정하지 않는다.  
-패턴은 `PATTERN_*` 태그와 `analysis_hints`로 저장되고, InitialAccessAgent가 API surface/GCS 모델과 함께 해석한다.
-
-| 패턴 | 조건 | 현재 활용 |
-|---|---|---|
-| `PATROL_TRANSIT` | 속도 > 80m/s + 작전구역 내 | 실행 전후 상태 변화 비교에 유리하다는 근거 |
-| `PATROL_TURNING` | 방위각 변화 > 30° | 비행 패턴 설명/재검증 근거 |
-| `LOITER_HOLDING` | 속도 < 10m/s + 위치 샘플 있음 | 즉각 반응이 약할 수 있다는 타이밍 근거 |
-| `DESCENT_OR_RTL` | 고도 변화 < -50m + 속도 < 100m/s | 이미 복귀/하강 중일 가능성 설명 |
-| `OUT_OF_AREA` | 작전구역(37.85-37.96°N) 이탈 | 위치 이상/재검증 필요성 근거 |
-| `MISSION_PROGRESS` | mission_seq 관측 | 임무 진행 중이라는 근거 |
-
----
-
-### Phase 5 — 결과 저장
-
-두 개의 JSON 파일을 `output/`에 생성한다. Docker 컨테이너 내부에서는 같은 볼륨이 `/app/output/`으로 보인다.
-
-```
-호스트:
-output/
-├── passive_mavlink_intel.json   ← 전체 상세 인텔
-└── intel_handoff.json           ← 후속 체인용 경량 파일
-
-컨테이너 내부:
-/app/output/
-```
-
-**intel_handoff.json 구조:**
-
-```jsonc
-{
-  "generated_at": "2026-07-01T14:30:00",
-  "target": {
-    "platform_id": "UAV-001",
-    "sys_id": 1,
-    "host": "172.31.50.10",
-    "cmd_port": 14551
-  },
-  "confidence": { "score": 1.00, "label": "HIGH — 정찰 신뢰도 높음" },
-  "uav_state": {
-    "armed": true,
-    "alt_m": 3500,
-    "lat": 37.9034,
-    "lon": 126.8512,
-    "pattern": "PATROL_TRANSIT",
-    "in_oa": true
-  },
-  "recon_tags": {
-    "tags": [
-      "CONFIDENCE_HIGH",
-      "PATTERN_PATROL_TRANSIT",
-      "API_BASELINE_AVAILABLE",
-      "LINK_METRICS_AVAILABLE",
-      "FAILSAFE_POLICY_OBSERVED"
-    ],
-    "selection_owner": "InitialAccessAgent",
-    "module_candidates_generated": false
-  },
-  "analysis_hints": [
-    {
-      "signal": "PATROL_TRANSIT_HIGH_ALT",
-      "reason": "순항 중 + 고도 3500m — 실행 전후 상태 변화 비교에 유리"
-    }
-  ],
-  "next_stage": "InitialAccessAgent"
-}
-```
-
----
-
-## 4. 실행 방법
-
-### 전제 조건
-
-```bash
-# 기본 스택이 실행 중이어야 한다
-cd C:\Users\taehy\OneDrive\문서\UAS\DAH_SMU
-docker compose up -d
-```
-
-서비스 상태 확인:
-```bash
-docker compose ps
-# dah-uav, dah-companion, dah-gcs, dah-dashboard, tactical-router 가 Up 상태여야 함
-```
-
----
-
-### ReconAgent 실행 (권장)
-
-```bash
-# ReconAgent가 dah-recon 수집 컨테이너 실행부터 정규화까지 수행
-python -m attack_agent.kill_chain --stage recon
-```
-
-기본 파라미터:
-- `--recon-listen-port 14550` — Companion mirror 수신 포트
-- `--recon-duration-s 30` — 30초 수집
-- `--recon-revalidate-s 20` — LOW 자산 재검증 20초
-- `--recon-prediction-horizon-s 60` — 60초 위치 예측
-- `--recon-output output/stage_1_recon.json`
-
-생성 파일:
+## 1. 핵심 통신 구조
 
 ```text
-output/passive_mavlink_intel.json
-output/intel_handoff.json
-output/stage_1_recon.json
-output/stage_1_recon_report.json
+UAV-001(dah-uav)
+  -> dah-companion
+  -> dah-gcs
+  -> tactical-router
+  -> mission-control
+
+dah-companion
+  -> dah-recon:14550        # MAVLink mirror, 수동 정찰
+
+dah-dashboard
+  -> /api/live              # 현재 상태
+  -> /api/failsafe          # fail-safe 정책
+  -> /api/agent-event       # 공격/방어 에이전트 로그
 ```
+
+주요 포트:
+
+| 대상 | 포트 | 용도 |
+|---|---:|---|
+| `dah-uav` | `14550/udp` | MAVLink telemetry |
+| `dah-uav` | `14551/udp` | MAVLink command |
+| `dah-companion` | `14550/udp` | UAV telemetry 수신 |
+| `dah-companion` | `14552/udp` | GCS direct command |
+| `dah-recon` | `14550/udp` | Companion mirror 수동 청취 |
+| `dah-gcs` | `14555/udp` | Companion JSON telemetry |
+| `tactical-router` | `14590/udp` | TMMR/TICN jamming simulation |
+| `dah-dashboard` | `8080/tcp` | API/UI, 호스트는 `localhost:9000` |
+
+`dah-recon`은 C2 경로에 끼어들지 않는다. 정찰 컨테이너가 꺼져도 `UAV -> Companion -> GCS -> Router -> Mission Control` 흐름은 유지된다.
 
 ---
 
-### 파라미터 커스터마이징
+## 2. ReconAgent 역할
 
-정찰 시간과 재검증 시간은 ReconAgent 옵션으로 조정한다.
+대상은 `UAV-001(SYS_ID=1, 172.31.50.10)`이다. `UDP:14550` MAVLink mirror를 수동 청취하고, 필요 시 Dashboard `GET /api/live`, `GET /api/failsafe`만 조회한다. 일반 UDP bind만 사용하므로 raw socket과 `CAP_NET_RAW`는 필요 없다.
 
-```bash
-# 30초만 수집 (빠른 테스트)
-python -m attack_agent.kill_chain --stage recon --recon-duration-s 30 --recon-revalidate-s 0
+정찰 파이프라인:
+
+```text
+P0 API 기준값 수집
+P1 MAVLink mirror 청취
+P2 신뢰도 채점
+P3 LOW 신뢰도 재검증
+P4 recon_tags / analysis_hints 생성
+P5 JSON 저장
 ```
 
-```bash
-# 기존 정찰 JSON만 다시 정규화
-python -m attack_agent.kill_chain --stage recon --skip-recon-collection
+### 2.1 수집 메시지
+
+| MAVLink 메시지 | 활용 |
+|---|---|
+| `HEARTBEAT` | 시스템 상태, 모드, heartbeat spoof/timeout 근거 |
+| `SYS_STATUS` | 배터리, packet drop, 통신 오류 |
+| `GLOBAL_POSITION_INT` | 위치, 고도, 속도, 공격 전후 상태 비교 |
+| `COMMAND_LONG` | GCS/상위 C2 명령 흐름 관측 |
+| `COMMAND_ACK` | 명령 수락/거부/진행 상태 추정 |
+| `MISSION_CURRENT`, `MISSION_COUNT` | 임무 진행 상태와 waypoint 흐름 |
+
+Dashboard API에서는 UAV/UGV 상태, `ticn_loss_pct`, `latency_ms`, `loss_critical_pct`, `hb_timeout_sec`, `failsafe_action`을 가져온다. 이 값은 공격 후보 생성과 방어 임계값 비교에 같이 쓰인다.
+
+### 2.2 정찰 신호
+
+| 신호 | 의미 | 후속 활용 |
+|---|---|---|
+| `MAVLINK_UNSIGNED_TRAFFIC` | MAVLink 서명 프레임 미관측 | spoof/injection 후보 |
+| `SYS_ID_DISCOVERED` | 표적 SYS_ID 식별 | 공격 대상 및 방어 allowlist |
+| `HEARTBEAT_OBSERVED` | heartbeat/status 관측 | heartbeat spoof/timeout 조건 |
+| `COMMAND_ACK_OBSERVED` | command ack 흐름 관측 | command injection 가능성 평가 |
+| `LINK_METRICS_AVAILABLE` | 손실률, 지연, LQ 관측 | EW link degradation 조건 |
+| `FAILSAFE_POLICY_OBSERVED` | fail-safe 임계값 확보 | 공격 성공 판정 및 방어 playbook |
+
+### 2.3 신뢰도 기준
+
+정찰 신뢰도는 메시지 반복성, 위치 샘플 반복성, 물리 일관성, 메시지 간 교차 검증, 프레임 무결성, freshness를 합산해 계산한다.
+
+```text
+HIGH   >= 0.80  재현 가능한 정찰 근거
+MEDIUM >= 0.50  후보 생성은 가능하나 추가 관측 권장
+LOW    <  0.50  지연, 스푸핑, 불완전 관측 가능성
 ```
+
+LOW 신뢰도 자산은 짧게 재청취해 더 좋은 관측값이 있으면 병합한다.
 
 ---
 
-### 전체 3단계 체인 실행
+## 3. 공격 체인
 
-```bash
-# 1. 정찰 수집 + 정규화
-python -m attack_agent.kill_chain --stage recon
+```text
+ReconAgent -> InitialAccessAgent -> FollowUpAttackAgent
 ```
 
-```bash
-# 2. 초기침투 분석 + Attack Graph 생성
-python -m attack_agent.kill_chain --stage initial-access
+| 단계 | 역할 | 주요 출력 |
+|---|---|---|
+| `ReconAgent` | 표적, 프로토콜, 링크 품질, fail-safe 정책 정리 | `stage_1_recon.json` |
+| `InitialAccessAgent` | 공격 표면과 후보 액션 생성 | `stage_2_initial_access.json`, `stage_2_attack_graph.json` |
+| `FollowUpAttackAgent` | 계획 수립, dry-run/execute, 실측 성공 판정 | `stage_3_attack_plan.json`, `stage_3_execution_report.json` |
+
+`FAILSAFE_INDUCTION`은 `fallback_until_success` 방식이다. 앞 단계가 성공하면 이후 단계는 실행하지 않는다.
+
+| 순서 | 공격 벡터 | 계열 | 실행 대상 | 성공 판정 |
+|---:|---|---|---|---|
+| 1 | `MAVLINK_STATUS_SPOOF` | A-1 인증 부재 | `dah-uav:14551` | 위치 이동 80m 미만, LOITER 추정 |
+| 2 | `HB_TIMEOUT_INDUCTION` | A-2 인증 부재 | `dah-uav:14551` | heartbeat 공백 후 LOITER 추정 |
+| 3 | `MAVLINK_COMMAND_INJECTION` | A-3 인증 부재 | `dah-uav:14551` | 실제 고도 50m 이상 하강 |
+| 4 | `EW_LINK_DEGRADATION_SIM` | B-1 링크 계층 | `tactical-router:14590` | 실제 `loss_pct` 목표치 이상 |
+| 5 | `EW_STEALTH_DEGRADATION_SIM` | B-2 링크 계층 | `tactical-router:14590` | 목표 band 내 링크 저하 |
+
+이 순서는 영향도 순서가 아니라 현재 mock UAV와 Dashboard에서 실험 성공 가능성이 높은 순서다. `MAVLINK_COMMAND_INJECTION`은 영향도는 가장 크지만 체인에서는 3번째다.
+
+Adapter는 다음처럼 분리된다.
+
+| Adapter | 담당 |
+|---|---|
+| `MavlinkInjectorAdapter` | heartbeat spoof, heartbeat timeout, command injection |
+| `JammerAdapter` | TMMR/TICN link degradation |
+| `TamperAdapter` | 네트워크 전송 없는 protocol integrity simulation |
+
+---
+
+## 4. 방어 체계
+
+```text
+DefensePolicyAgent -> DefenseDetectionAgent -> DefenseResponseAgent -> DefenseRecoveryAgent
 ```
 
-```bash
-# 3. 후속공격 계획 생성
-python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTION --max-steps 1
-```
+| Agent | 역할 |
+|---|---|
+| `DefensePolicyAgent` | 정상 자산, 허용 SYS_ID, 명령 allowlist, 노출 포트 정책 로드 |
+| `DefenseDetectionAgent` | command injection, replay, GPS spoofing, jamming, fail-safe 유도 탐지 |
+| `DefenseResponseAgent` | `BLOCK_COMMAND`, `FORCE_RTL`, `FREQ_HOP`, `HOLD_POSITION` 등 playbook 실행 |
+| `DefenseRecoveryAgent` | 정상화 확인, 사고 보고서, 정책 개선안 저장 |
 
-```bash
-# 4. 안전한 로컬 Docker 테스트베드 이벤트 실행
+공격-방어 매핑:
+
+| 공격/이상징후 | 방어 판단 |
+|---|---|
+| Heartbeat spoof | 비정상 SYS_ID/status 변화 |
+| Heartbeat timeout | heartbeat gap + mission mode 상관 |
+| Command injection | 허용되지 않은 출처의 `COMMAND_LONG` |
+| EW link degradation | `loss_pct`, RSSI, LQ 임계값 초과 |
+| Stealth degradation | UAV 임계값과 방어 임계값 사이 gap 악용 |
+
+방어 이벤트는 Dashboard 로그의 `Defense Agent` 필터에서 확인한다.
+
+---
+
+## 5. 실행
+
+```powershell
+# 기본 테스트베드
+docker compose up -d --build
+
+# ReconAgent
+docker compose --profile recon-lab up --build dah-recon
+
+# 공격 체인 dry-run
+python -m attack_agent.kill_chain --objective FAILSAFE_INDUCTION --recon-duration-s 30
+
+# Docker lab 내부 명시 실행
 $env:ENABLE_LAB_ATTACKS="true"
-python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTION --execute --max-steps 1
+python -m attack_agent.kill_chain --objective FAILSAFE_INDUCTION --recon-duration-s 30 --execute
+
+# DefenseAgent
+docker compose --profile defense-lab up --build dah-defense
+```
+
+Dashboard는 `http://localhost:9000`에서 확인한다.
+
+---
+
+## 6. 산출물과 검증 포인트
+
+| 파일 | 의미 |
+|---|---|
+| `output/passive_mavlink_intel.json` | 수동 정찰 원본 요약 |
+| `output/intel_handoff.json` | 공격 체인 인계용 정찰 문서 |
+| `output/stage_1_recon.json` | ReconAgent 표준 출력 |
+| `output/stage_2_initial_access.json` | 공격 표면 분석 결과 |
+| `output/stage_2_attack_graph.json` | 자산/통신 edge/공격 후보 그래프 |
+| `output/stage_3_attack_plan.json` | FollowUpAttackAgent 실행 계획 |
+| `output/stage_3_execution_report.json` | 실행 결과와 성공 판정 |
+| `output/defense_incident_report.json` | 방어 사고 보고서 |
+| `output/defense_policy_recommendations.json` | 방어 정책 개선안 |
+
+Dashboard 로그 필터:
+
+| 필터 | 확인 내용 |
+|---|---|
+| `Attack Agent` | 공격 단계, 벡터명, 실행 결과, fail-safe 유도 이벤트 |
+| `Defense Agent` | 탐지, 대응, 복구 이벤트 |
+| `UAV` | 고도, 속도, mode, battery, command 결과 |
+| `TEL` | 손실률, RSSI, LQ, TMMR/TICN 상태 |
+
+보고서에 넣을 때는 다음 흐름으로 정리하면 된다.
+
+```text
+정찰 근거 -> 후보 공격 생성 -> 단계별 fail-safe 유도 -> Dashboard/산출물 검증 -> 방어 탐지/대응
 ```
 
 ---
 
-### 결과 확인
+## 7. 안전 범위
 
-```bash
-# 실시간 로그
-docker logs -f dah-recon
-
-# 결과 파일 확인 (호스트 PowerShell)
-Get-Content output\passive_mavlink_intel.json
-Get-Content output\intel_handoff.json
-```
-
----
-
-## 5. 출력 파일 상세
-
-### passive_mavlink_intel.json
-
-```
-meta                       — 시나리오 메타데이터 및 제약 플래그
-phase0_api_baseline        — Dashboard API 사전 정찰 결과
-collection_summary         — 패킷 수, 파싱 오류, CRC 통계, 메시지 분포
-assets                     — 자산별 원시 관측 데이터 (position_history 포함)
-uav001
-  ├── confidence            — 6-팩터 점수 및 상세
-  ├── state                 — 최신 UAV 상태값
-  ├── pattern               — 행동 패턴 (PATROL_TRANSIT 등)
-  ├── prediction            — 위치 예측 (constant_velocity 모델)
-  └── timing_recs           — InitialAccessAgent가 참고할 분석 힌트
-recon_tags                 — Phase 4 정찰 태그/분석 신호
-revalidation               — Phase 3 재검증 변경 이력
-blue_team_mapping          — 탐지 계층별 가시성 및 권고 통제
-ghost_sentinel             — 고권한 수동 정찰 위협모델 비교
-```
-
-### intel_handoff.json
-
-InitialAccessAgent가 파싱하기 위한 경량 파일.  
-현재 표준 체인에서는 `ReconAgent`가 이 파일을 `stage_1_recon.json`으로 정규화하고, `InitialAccessAgent`가 `recon_tags`와 API surface를 근거로 후속 모듈 후보를 생성한다.
-
----
-
-## 6. 후속 모듈 연계 구조
-
-```
-ReconAgent
-  ├── Phase 0: /api/live + /api/failsafe
-  ├── Phase 1: passive MAVLink mirror 수집
-  ├── Phase 4: recon_tags / analysis_hints 생성
-  └── stage_1_recon.json
-        ↓
-InitialAccessAgent
-  ├── API surface / asset / edge / GCS model 생성
-  └── recon_tags 기반 후속 모듈 후보 생성
-        ├── EW_LINK_DEGRADATION_SIM
-        └── PROTOCOL_FRAME_INTEGRITY_SIM
-        ↓
-FollowUpAttackAgent
-  ├── AttackPlan 생성
-  └── 명시 실행 시 안전 시뮬레이션 이벤트 전송
-```
-
----
-
-## 7. Dashboard 이벤트 흐름
-
-recon.py는 `dah-dashboard:14571`(UDP)으로 이벤트를 실시간 전송한다.  
-대시보드 `/api/live` → `agent_events` 배열에서 확인 가능.
-
-```jsonc
-// 이벤트 구조
-{
-  "platform_type": "AGENT",
-  "agent_type":    "ATK",
-  "platform_id":   "ATK-RECON",
-  "source":        "PASSIVE-MAVLINK-RECON",
-  "message":       "UAV-001 HIGH 신뢰도 확보",
-  "detail":        "score=1.00 armed=Y alt=3500m pattern=PATROL_TRANSIT",
-  "level":         "warn",
-  "status":        "ALERT",
-  "time":          "14:30:05"
-}
-```
-
-**주요 이벤트 타이밍:**
-
-| 단계 | 이벤트 level | 메시지 |
-|---|---|---|
-| 파이프라인 시작 | info | "정찰 파이프라인 시작" |
-| Phase 0 완료 | warn | "Phase 0 완료 — 운용 상태 및 Fail-safe 정책 수집" |
-| Phase 1 완료 | warn/info | "Phase 1 완료 — N개 자산 식별" |
-| HIGH 신뢰도 확보 | warn | "UAV-001 HIGH 신뢰도 확보" |
-| 정찰 신호 정규화 | info | "정찰 신호 정규화 완료" |
-| 인텔 저장 완료 | info | "인텔 저장 완료" |
-
----
-
-## 8. 탐지 분석 (Blue-team)
-
-| 탐지 계층 | 가시성 | 이유 | 권고 통제 |
-|---|---|---|---|
-| GCS 감사로그 | Phase 0: 중간 / Phase 1: 낮음 | HTTP 요청 2회 (Phase 0만) | Dashboard→GCS API 로그 + 비정상 출처 검출 |
-| dah-net IDS | 중간 | UDP 14550 다중 수신자 식별 어려움 | 비인가 UDP bind 이벤트 경보 |
-| Docker 이벤트 | 높음 | recon-lab 컨테이너 시작 로그 | `docker events` 모니터링 |
-| 호스트 EDR/eBPF | 중간-높음 | 14550 SO_REUSEPORT bind 추적 가능 | 소켓 수명·프로세스 계보 감사 |
-| MAVLink 서명 | 노출=높음 | mirror 구간에서 프레임 메타데이터 관측 가능 | MAVLink v2 서명 강제 + mirror 권한 통제 |
-
-**Ghost Sentinel 비교 (미구현):**  
-AF_PACKET/CAP_NET_RAW를 사용하면 dah-net 내 unicast 패킷까지 수신 가능하다.  
-현재 Low-Privilege Sentinel은 Companion mirror 포트만 수신 — UDP bind 테이블에 노출된다.  
-Ghost Sentinel은 bind 테이블에 없으나 CAP_NET_RAW 정책 이벤트로 탐지 가능하다.
-
----
-
-## 9. 보안 제약
-
-다음 제약은 DAH 2026 대회 규정에 따라 절대 준수한다.
-
-- ✅ Docker dah-net 내 Companion mirror UDP 수신만 허용
-- ✅ Dashboard HTTP API 호출만 허용 (읽기 전용 엔드포인트)
-- ❌ raw socket / AF_PACKET / CAP_NET_RAW 사용 금지
-- ❌ 실제 MAVLink 패킷 주입 금지
-- ❌ 실제 군 장비(TICN, TMMR, 군 C2/BMS) 연결 금지
-- ❌ 외부 IP 대상 트래픽 생성 금지
-- ❌ 실제 드론 actuator 제어 금지
-
----
-
-## 10. 파일 구조
-
-```
-attack_agent/
-├── recon.py              ← 6단계 정찰 파이프라인 (이 시나리오)
-├── mavlink_parser.py     ← MAVLink v1/v2 커스텀 파서 (stdlib only)
-├── kill_chain.py         ← 3단계 체인 컨트롤러
-├── agents/               ← Recon / Initial Access / Follow-up Agent
-├── adapters/             ← 안전 후속 모듈 실행 어댑터
-├── tamper/               ← 합성 프레임 무결성 테스트
-├── Dockerfile            ← 공격 에이전트 이미지
-└── RECON.md              ← 이 문서
-
-output/                   ← 볼륨 마운트 (./output:/app/output)
-├── passive_mavlink_intel.json   ← 전체 인텔
-└── intel_handoff.json           ← 후속 체인용 경량 파일
-```
-
----
-
-## 11. mavlink_parser.py 원리
-
-`recon.py`는 pymavlink 없이 자체 파서를 사용한다.  
-외부 의존 없이 stdlib(`struct`, `json`, `dataclasses`)만으로 MAVLink를 해석한다.
-
-**CRC 검증 (x25):**
-
-```python
-def x25_checksum(data: bytes) -> int:
-    crc = 0xFFFF
-    for byte in data:
-        tmp = byte ^ (crc & 0xFF)
-        tmp = (tmp ^ (tmp << 4)) & 0xFF
-        crc = ((crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)) & 0xFFFF
-    return crc
-
-# 검증: x25(payload + CRC_EXTRA[msg_id]) == frame의 CRC 2바이트
-```
-
-**CRC_EXTRA 값 (DAH_SMU 주요 메시지):**
-
-| 메시지 | MSG_ID | CRC_EXTRA |
-|---|---|---|
-| HEARTBEAT | 0 | 50 |
-| SYS_STATUS | 1 | 124 |
-| GLOBAL_POSITION_INT | 33 | 104 |
-| COMMAND_LONG | 76 | 152 |
-| COMMAND_ACK | 77 | 143 |
-
-**MAVLink 서명 탐지:**
-
-```
-v2 프레임에서 incompat_flags & 0x01 == 1
-→ 프레임 끝 13바이트가 서명 (link_id 1B + timestamp 6B + signature 6B)
-→ 서명이 있어도 payload는 평문 → 내용 도청 가능
-→ signed_frames 카운터 증가 (보안 수준 지표)
-```
+- DAH Docker 폐쇄 실험망 전용이다.
+- 실제 항공기, 실제 RF, 외부 네트워크, 실장비 C2 링크를 대상으로 하지 않는다.
+- 기본은 dry-run이다. 실제 실험 이벤트는 `ENABLE_LAB_ATTACKS=true`와 `--execute`가 모두 필요하다.
+- EW 재밍은 실제 전파 방해가 아니라 Router의 TMMR/TICN 상태를 바꾸는 JSON/UDP 시뮬레이션이다.
+- `MAVLINK_STATUS_SPOOF`, `HB_TIMEOUT_INDUCTION`은 mock UAV의 mode 노출 한계 때문에 위치 이동 휴리스틱을 함께 사용한다.

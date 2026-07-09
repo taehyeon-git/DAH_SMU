@@ -61,11 +61,12 @@ class TICNNetwork:
                 lnk.loss_pct = round(random.uniform(65, 88), 1)
             else:
                 range_f = max(0.0, 1.0 - (dist_km / spec['max_range_km']) ** 1.5)
-                rssi_f  = max(0.0, min(1.0, (tmmr.rssi + 100) / 60))
+                rssi_f  = max(0.0, min(1.0, (tmmr.rssi + 125) / 55))
                 power_f = tmmr.tx_power / 100
                 lq = int((range_f * 0.5 + rssi_f * 0.35 + power_f * 0.15) * 100)
                 lq = max(5, min(100, lq + int(random.gauss(0, 2))))
-                lnk.loss_pct = round(max(0.0, (65 - lq) / 65) * 40 + spec['base_loss'] * 100, 1)
+                normal_loss = max(0.0, (70 - lq) / 70) * 25 + spec['base_loss'] * 100
+                lnk.loss_pct = round(min(45.0, normal_loss), 1)
 
             lnk.quality    = lq
             lnk.dist_km    = round(dist_km, 2)

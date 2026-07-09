@@ -12,7 +12,6 @@ services:
       CC_HOST: 172.31.50.30        # companion computer IP
       CC_PORT: "14550"
       CMD_PORT: "14551"
-      SITL_SPEEDUP: "5"
     networks:
       dah-net:
         ipv4_address: 172.31.50.10         # UAV 고정 IP
@@ -171,7 +170,8 @@ services:
       - dah-companion
     command:
       - python
-      - recon.py
+      - -m
+      - attack_agent.recon
       - --listen-host
       - "0.0.0.0"
       - --listen-port
@@ -191,7 +191,6 @@ services:
       DASHBOARD_PORT: "14571"
       UAV_HOST: 172.31.50.10
       UAV_CMD_PORT: "14551"
-      AGENT_EXECUTOR_HOST: 172.31.50.50
     volumes:
       - ./output:/app/output
     networks:

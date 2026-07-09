@@ -12,14 +12,6 @@
 </head>
 <body>
 
-<!-- 사이드바 -->
-<nav class="sidebar">
-  <div class="sidebar-logo">C2</div>
-  <div class="nav-item active" onclick="switchDashboard(1)"><span class="icon">⊞</span>대시보드</div>
-  <div class="nav-item" onclick="switchDashboard(2)"><span class="icon">◈</span>대시보드2</div>
-  <div class="nav-item" onclick="switchDashboard(3)"><span class="icon">⌖</span>GCS</div>
-</nav>
-
 <!-- 메인 -->
 <div class="main">
 
@@ -51,17 +43,8 @@
     {% include "dash1/_logs.html" %}
   </div>
 
-  <!-- 대시보드2 -->
-  <div class="content" id="dash2" style="display:none;">
-    {% include "dash2/_filter.html" %}
-    {% include "dash2/_logs.html" %}
-    {% include "dash2/_agent.html" %}
-  </div>
 
 </div>
-
-<!-- GCS -->
-{% include "gcs/_panel.html" %}
 
 {% include "_scripts.html" %}
 </body>

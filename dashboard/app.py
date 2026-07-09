@@ -22,7 +22,6 @@ GCS_SYS_ID            = 255  # 정상 GCS SYS_ID
 router_platforms: dict = {}
 local_events: deque  = deque(maxlen=100)
 agent_events: deque  = deque(maxlen=300)
-mission_alert_until = 0.0
 failsafe_sim: dict = {
     "active": False,
     "vehicle_id": None,
@@ -46,15 +45,8 @@ mission_state: dict = {
 }
 
 
-def is_mission_alert_active():
-    return time.time() < mission_alert_until
-
-
-def update_mission_state(update: dict, alert_hold_sec: int = 0):
-    global mission_alert_until
+def update_mission_state(update: dict):
     mission_state.update(update)
-    if alert_hold_sec > 0:
-        mission_alert_until = time.time() + alert_hold_sec
 
 
 def is_failsafe_sim_active():
@@ -127,7 +119,7 @@ def _sync_failsafe_mission_state(altitude: float):
             "cmd": "FAILSAFE_LANDED",
             "cmd_at": time.strftime("%H:%M:%S"),
             "cmd_by": "Safe Follow-up Simulation Module",
-        }, alert_hold_sec=60)
+        })
 
 
 def apply_failsafe_simulation(platforms: list[dict]) -> list[dict]:
@@ -211,7 +203,7 @@ def record_agent_event(payload: dict):
             "cmd": status,
             "cmd_at": time.strftime("%H:%M:%S"),
             "cmd_by": "Synthetic Protocol Integrity Monitor",
-        }, alert_hold_sec=60)
+        })
     elif message_type == "link_degradation_alert":
         vehicle_id = vehicle_id or "UAV-001"
         activate_failsafe_sim(vehicle_id, action="LAND", source=payload.get("source", "attack_chain"))
@@ -226,7 +218,7 @@ def record_agent_event(payload: dict):
             "cmd": "FAILSAFE_TRIGGERED",
             "cmd_at": time.strftime("%H:%M:%S"),
             "cmd_by": "Safe Follow-up Simulation Module",
-        }, alert_hold_sec=60)
+        })
     else:
         message = payload.get("message", "agent event")
         detail = payload.get("detail", "")
@@ -302,26 +294,27 @@ def _router_udp_listener():
                 tmmr = payload.get("tmmr", {})
                 loss_pct = ticn.get("loss_pct", 100.0)
                 link_quality = ticn.get("link_quality", 0)
+                hard_lost = bool(tmmr.get("blackout")) or float(loss_pct or 0) >= 75 or float(link_quality or 0) <= 15
 
                 local_events.appendleft({
                     "type":    "telemetry",
                     "time":    payload.get("time", time.strftime("%H:%M:%S")),
-                    "level":   "warn",
+                    "level":   "warn" if hard_lost else "info",
                     "source":  target or "TICN-LINK",
-                    "message": payload.get("message", "전술 데이터링크 통신 두절"),
-                    "status":  "COMMS_LOST",
+                    "message": payload.get("message", "전술 데이터링크 패킷 드롭"),
+                    "status":  "COMMS_LOST" if hard_lost else "PACKET_DROP",
                 })
 
                 if target:
                     prev = router_platforms.get(target, {})
                     ptype_hint = prev.get("platform_type") or ("UAV" if target.startswith("UAV") else "UGV")
-                    router_platforms[target] = {
+                    updated = {
                         **prev,
                         "platform_id": target,
                         "platform_type": ptype_hint,
-                        "mode": "LOITER" if target.startswith("UAV") else prev.get("mode", "AUTO"),
-                        "status": "COMMS_LOST",
-                        "comms_lost": True,
+                        "mode": "LOITER" if hard_lost and target.startswith("UAV") else prev.get("mode", "AUTO"),
+                        "status": "COMMS_LOST" if hard_lost else prev.get("status", "ACTIVE"),
+                        "comms_lost": hard_lost,
                         "gcs_received_at": time.time(),
                         "tmmr": {**prev.get("tmmr", {}), **tmmr},
                         "ticn": {
@@ -331,19 +324,24 @@ def _router_udp_listener():
                             "link_quality": link_quality,
                         },
                     }
+                    if not hard_lost:
+                        updated.pop("comms_lost", None)
+                        if updated.get("status") == "COMMS_LOST":
+                            updated["status"] = "ACTIVE"
+                    router_platforms[target] = updated
 
-                if not is_mission_alert_active() and not is_failsafe_sim_active():
-                    update_mission_state({
-                        "phase":  "LOITER",
-                        "desc":   "통신 두절로 제자리 배회",
-                        "advice": "현재 좌표 유지, 전술 링크 복구 대기",
-                        "cmd":    "COMMS_LOST",
-                        "cmd_at": payload.get("time", time.strftime("%H:%M:%S")),
-                        "cmd_by": "TICN/TMMR",
-                    })
+                # 전술 링크 손실은 링크 상태 패널에만 반영 — 임무 단계는 C2 명령으로만 변경
                 continue
 
-            router_platforms[pid] = {**payload, "gcs_received_at": time.time()}
+            clean_payload = {**payload, "gcs_received_at": time.time()}
+            ticn = clean_payload.get("ticn", {}) if isinstance(clean_payload.get("ticn"), dict) else {}
+            tmmr = clean_payload.get("tmmr", {}) if isinstance(clean_payload.get("tmmr"), dict) else {}
+            link_ok = not tmmr.get("blackout") and float(ticn.get("loss_pct", 0) or 0) < 75 and float(ticn.get("link_quality", 100) or 100) > 15
+            if link_ok:
+                clean_payload.pop("comms_lost", None)
+                if clean_payload.get("status") == "COMMS_LOST":
+                    clean_payload["status"] = "ACTIVE"
+            router_platforms[pid] = clean_payload
 
             # GCS를 거치지 않는 플랫폼(UGV 등)은 여기서 로컬 이벤트 생성
             if ptype != "UAV":
@@ -561,8 +559,8 @@ TOPOLOGY = {
     "notes": [
         "텔레메트리 파이프라인: CC → GCS → (Dashboard / Collector / Router) → Upper C2/BMS",
         "명령 파이프라인: Upper C2/BMS → Router → GCS → CC → UAV FC (MAVLink)",
-        "Recon/Executor/Defense는 별도의 직접 공격/방어 실습 레이어로 유지됩니다.",
-        "Upper C2/BMS API: http://localhost:8082  |  GCS API: http://localhost:8083",
+        "Recon/Defense는 별도의 직접 공격/방어 실습 레이어로 유지됩니다.",
+        "Gateway API: http://localhost:9000  |  GCS API: /gcs/  |  Upper C2/BMS API: /c2/",
     ],
 }
 
@@ -577,8 +575,6 @@ def fetch_json(path):
 
 
 def json_loads(raw):
-    import json
-
     return json.loads(raw.decode("utf-8"))
 
 

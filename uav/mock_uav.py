@@ -7,7 +7,7 @@ import urllib.request
 from pymavlink import mavutil
 
 DASHBOARD_URL = "http://dah-dashboard:8080"
-LINK_LOST_THRESHOLD = 15   # loss_pct 이상이면 Link Lost
+LINK_LOST_THRESHOLD = 75   # loss_pct 이상이면 Link Lost (VHF 사거리 초과 시 30~40% 정상)
 
 # ─────────────────────────────────────────
 # 송골매 UAV 기본 설정값
@@ -18,29 +18,30 @@ CMD_PORT    = 14551
 SYS_ID      = 1
 PLATFORM_ID = 'UAV-001'
 MISSION     = 'RECON'
-ALTITUDE    = 3500        # 순항 고도 (m)
-SPEED_KMH   = 600         # 순항 속도 (km/h)
+ALTITUDE    = 2000        # 순항 고도 (m)
+SPEED_KMH   = 1200        # 순항 속도 (km/h)
 SPEED_MS    = SPEED_KMH / 3.6  # m/s
 FUEL        = 78
 EO_STATUS   = 'ACTIVE'
 IR_STATUS   = 'ACTIVE'
 
-# 경기 북부 정찰 웨이포인트 (위도, 경도) — 각 꺾임이 명확한 다각형 경로
+# 평양 출발 → 대한민국 GP 라인 순찰 → 평양 귀환 웨이포인트 (위도, 경도)
 WAYPOINTS = [
-    (37.895, 126.800),   # WP1 — 서쪽 출발점
-    (37.945, 126.820),   # WP2 — 북서 (위로 크게 이동)
-    (37.955, 126.870),   # WP3 — 북동 (오른쪽으로 이동)
-    (37.930, 126.910),   # WP4 — 동쪽 끝 (아래로 꺾임)
-    (37.885, 126.905),   # WP5 — 남동 (아래로 크게 이동)
-    (37.860, 126.855),   # WP6 — 남쪽 (왼쪽 아래로 꺾임)
-    (37.870, 126.810),   # WP7 — 남서 (왼쪽으로 꺾임)
+    (39.019, 125.738),   # WP1 — 평양 기지 (출발·귀환점)
+    (38.700, 126.100),   # WP2 — 황주 남쪽 (남동 진출)
+    (38.350, 126.400),   # WP3 — 군사분계선 북방
+    (37.920, 126.700),   # WP4 — 파주 GP 근처 (MDL 이남 서측)
+    (37.870, 127.050),   # WP5 — 연천 GP 근처 (MDL 이남 동측)
+    (38.200, 127.100),   # WP6 — 귀환 진입 (DMZ 북쪽 동측)
+    (38.750, 126.300),   # WP7 — 황해북도 북상
 ]
 
-# 위경도 거리 계산 상수
+# 위경도 거리 계산 상수 (임무 중심 위도 ≈ 38.5° 기준)
 LAT_PER_M = 1 / 111_000
-LON_PER_M = 1 / (111_000 * math.cos(math.radians(37.9)))
+LON_PER_M = 1 / (111_000 * math.cos(math.radians(38.5)))
 
 status = {'mode': 'MISSION', 'alt': ALTITUDE}  # MISSION | LANDING | RTL | LOITER | PAUSED
+_resume_until = 0.0    # RESUME 명령 이후 link_monitor 억제 종료 시각
 
 # GCS heartbeat 감시용
 _gcs_hb_last  = time.time()
@@ -58,7 +59,10 @@ def link_monitor():
             pmap = {p["platform_id"]: p for p in data.get("platforms", [])}
             uav  = pmap.get("UAV-001", {})
             loss = uav.get("ticn", {}).get("loss_pct", 0) or 0
-            if loss >= LINK_LOST_THRESHOLD and status['mode'] == 'MISSION':
+            # RESUME 쿨다운 또는 보호 모드 중이면 LOITER 전환 억제
+            if time.time() < _resume_until:
+                continue
+            if loss >= LINK_LOST_THRESHOLD and status['mode'] not in ('LOITER', 'PAUSED', 'LANDING', 'RTL'):
                 print(f"[송골매] ⚠️  Link Lost (loss={loss}%) → LOITER 전환")
                 status['mode'] = 'LOITER'
                 loiter_ticks = 0
@@ -84,7 +88,7 @@ def gcs_heartbeat_watchdog():
 
 
 def listen_for_commands():
-    global _gcs_hb_last
+    global _gcs_hb_last, _resume_until
     cmd_conn = mavutil.mavlink_connection(f'udpin:0.0.0.0:{CMD_PORT}')
     print(f"[송골매] 명령 수신 대기 중 → 포트 {CMD_PORT}")
     while True:
@@ -124,6 +128,7 @@ def listen_for_commands():
         elif cmd == mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM:
             print(f"[송골매] HOLD 명령 수신 SYS_ID={src} → 선회 대기")
             status['mode'] = 'LOITER'
+            _resume_until = time.time() + 60.0   # 60초간 link_monitor 자동복귀 억제
         elif cmd == mavutil.mavlink.MAV_CMD_DO_PAUSE_CONTINUE:
             if msg.param1 == 0:
                 print(f"[송골매] PAUSE 명령 수신 SYS_ID={src} → 임무 정지")
@@ -131,6 +136,7 @@ def listen_for_commands():
             else:
                 print(f"[송골매] RESUME 명령 수신 SYS_ID={src} → 임무 재개")
                 status['mode'] = 'MISSION'
+                _resume_until = time.time() + 30.0   # 30초간 link_monitor LOITER 재전환 억제
         elif cmd == mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED:
             print(f"[송골매] MONITOR 명령 수신 SYS_ID={src} → 감시 모드")
             status['mode'] = 'MISSION'
@@ -179,8 +185,8 @@ def main():
             status['alt'] = alt
             print(f"[송골매] ⚠️  착륙 중 (공격)... 현재 고도={alt}m")
             if alt == 0:
-                print("[송골매] 착륙 완료. 임무 중단.")
-                break
+                print("[송골매] 착륙 완료. LOITER 대기.")
+                status['mode'] = 'LOITER'
         elif status['mode'] == 'RTL':
             # 출발지(WP1)로 비행하면서 하강
             home_lat, home_lon = WAYPOINTS[0]
@@ -197,8 +203,9 @@ def main():
                 status['alt'] = alt
             print(f"[송골매] RTL 귀환 중... 고도={alt}m 거리={dist_m:.0f}m → WP1")
             if alt == 0 and dist_m < 500:
-                print("[송골매] RTL 완료. 귀환 착륙.")
-                break
+                print("[송골매] RTL 완료. 귀환 착륙 — LOITER 대기")
+                status['mode'] = 'LOITER'
+                status['alt']  = 0
         else:
             # ── 다음 웨이포인트 방향으로 이동
             wp_lat, wp_lon = WAYPOINTS[wp_idx]
@@ -257,7 +264,7 @@ def main():
             lon=int(lon * 1e7),
             alt=int(alt * 1000),
             relative_alt=int(alt * 1000),
-            vx=int(SPEED_MS * 100),
+            vx=min(int(SPEED_MS * 100), 32767),  # int16_t 최대값 캡핑
             vy=0, vz=0,
             hdg=int(hdg * 100)
         )
