@@ -15,10 +15,10 @@ Defense Policy Agent
 
 | Agent | 단계 | 역할 | 주요 출력 |
 |---|---|---|---|
-| `DefensePolicyAgent` | 예방/정책 | 정상 자산, SYS_ID, 허용 명령, 공격면 노출 정책 로드 | policy snapshot event |
+| `DefensePolicyAgent` | 예방/정책 | 정상 자산, SYS_ID, 허용 명령, 공격면 노출 정책 로드 및 Dashboard/Router/UAV 예방 게이트 활성화 | policy snapshot event |
 | `DefenseDetectionAgent` | 탐지/분석 | MAVLink command, replay, GPS spoofing, jamming, fail-safe, protocol integrity alert 분석 | `Threat` object |
-| `DefenseResponseAgent` | 대응/차단 | 사전 정의된 안전 playbook만 실행 | `DefenseAction` object |
-| `DefenseRecoveryAgent` | 복구/개선 | 상태 정상화 확인, 사고 보고서 및 정책 개선안 저장 | JSON reports |
+| `DefenseResponseAgent` | 대응/차단 | 사전 정의된 안전 playbook만 실행하고 필요 시 차단 게이트 재적용 | `DefenseAction` object |
+| `DefenseRecoveryAgent` | 복구/개선 | 상태 정상화와 방어 게이트 활성 여부 확인, 사고 보고서 및 정책 개선안 저장 | JSON reports |
 | `DefenseOrchestrator` | 실행 관리 | 4개 Agent 실행, queue 연결, heartbeat 전송 | orchestrator event |
 
 ## 2. 공격-방어 매핑
@@ -27,7 +27,7 @@ Defense Policy Agent
 |---|---|---|
 | `ReconAgent` | `DefensePolicyAgent` | Recon mirror, Router API, attack event port의 lab-only 노출 정책 점검 |
 | `InitialAccessAgent` | `DefenseDetectionAgent` | 비정상 SYS_ID, command injection, replay, API/GCS 이상 상태 탐지 |
-| `FollowUpAttackAgent` | `DefenseResponseAgent` | 안전 playbook으로 RTL, SAFE_MODE, FREQ_HOP, INS fallback, HOLD 권고 수행 |
+| `FollowUpAttackAgent` | `DefenseResponseAgent` | Dashboard/Router/UAV 차단 게이트, RTL, SAFE_MODE, FREQ_HOP, INS fallback, HOLD 권고 수행 |
 | 반복/지속 교란 | `DefenseRecoveryAgent` | loss_pct, gps_spoofed, mission_state 정상화 확인 및 정책 개선 제안 |
 
 ## 3. 탐지 시나리오
@@ -39,7 +39,7 @@ Defense Policy Agent
 | `UNKNOWN_COMMAND` | 허용 명령 목록 밖 command | `BLOCK_COMMAND`, `IGNORE_AND_MONITOR` |
 | `REPLAY_ATTACK` | `seq <= previous_seq` | `BLOCK_COMMAND`, `SAFE_MODE` |
 | `GPS_SPOOFING` | `gps_spoofed=true` 또는 implied speed 임계값 초과 | `INS_FALLBACK`, `HOLD_POSITION` |
-| `EW_LINK_DEGRADATION` | `loss_pct >= jamming_loss_warn` | `IGNORE_AND_MONITOR` |
+| `EW_LINK_DEGRADATION` | `loss_pct >= jamming_loss_warn` 또는 차단된 link degradation event | `FREQ_HOP`, `HOLD_POSITION` |
 | `JAMMING_CRITICAL` | `loss_pct >= jamming_loss_critical` | `FREQ_HOP`, `HOLD_POSITION` |
 | `FAILSAFE_INDUCTION` | heartbeat gap + link degradation/fail-safe 상태 동시 관측 | `HOLD_POSITION`, `FORCE_RTL` |
 | `PROTOCOL_FRAME_INTEGRITY` | Dashboard agent event에서 protocol integrity alert 관측 | `BLOCK_COMMAND`, `IGNORE_AND_MONITOR` |
@@ -48,12 +48,12 @@ Defense Policy Agent
 
 | Playbook | 구현 방식 | 안전 범위 |
 |---|---|---|
-| `BLOCK_COMMAND` | Dashboard-compatible DEF event로 command trust gate 차단 기록 | 이벤트 기반 |
+| `BLOCK_COMMAND` | UAV 명령 신뢰 게이트와 Dashboard 공격 이벤트 차단 게이트 활성화 | Docker UAV / Dashboard only |
 | `FORCE_RTL` | 사전 정의된 `MAV_CMD_NAV_RETURN_TO_LAUNCH`를 lab UAV로 전송 | Docker lab UAV only |
 | `SAFE_MODE` | 사전 정의된 safe mode 전환 명령을 lab UAV로 전송 | Docker lab UAV only |
-| `FREQ_HOP` | Router `/api/ticn/clear`로 VHF/UHF jam 상태 초기화 | Router simulation only |
+| `FREQ_HOP` | Router 재밍/지연 차단 게이트 활성화 후 VHF/UHF/HF jam 상태 초기화 | Router simulation only |
 | `INS_FALLBACK` | GPS 신뢰도 저하 및 INS fallback event 기록 | 이벤트 기반 |
-| `HOLD_POSITION` | 임의 명령 생성 없이 hold-position 권고 event 기록 | 이벤트 기반 |
+| `HOLD_POSITION` | Dashboard fail-safe overlay 차단 게이트 유지, 임의 명령 생성 없이 hold-position 권고 event 기록 | Dashboard / event 기반 |
 | `IGNORE_AND_MONITOR` | 대응 없이 모니터링 지속 | 이벤트 기반 |
 
 ## 5. 실행 방법
@@ -81,6 +81,14 @@ python -m defense_agents.orchestrator --once
 ```powershell
 python -m defense_agents.orchestrator
 ```
+
+방어가 먼저 실행된 상태에서 공격 체인을 실행하면 공격 효과는 아래 지점에서 차단된다.
+
+| 차단 지점 | 효과 |
+|---|---|
+| Dashboard guard | 공격 이벤트가 fail-safe overlay 또는 mission state 변경으로 이어지지 않도록 차단 |
+| Router guard | EW/JAM/delay lab event가 TICN 손실률 변경으로 이어지지 않도록 차단 |
+| UAV guard | 비허용 SYS_ID, `MAV_CMD_NAV_LAND`, `MAV_CMD_DO_SET_MODE`, CRITICAL/EMERGENCY heartbeat 위조 차단 |
 
 ## 6. Dashboard 이벤트
 

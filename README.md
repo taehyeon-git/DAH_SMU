@@ -195,6 +195,8 @@ python -m attack_agent.kill_chain --stage follow-up --objective FAILSAFE_INDUCTI
 DefensePolicyAgent → DefenseDetectionAgent → DefenseResponseAgent → DefenseRecoveryAgent
 ```
 
+방어 에이전트를 먼저 실행하면 Policy/Response 단계가 Dashboard, Router, UAV에 예방 게이트를 적용한다. 이후 공격 체인이 lab event를 전송해도 Dashboard는 fail-safe overlay 전환을 막고, Router는 EW/JAM 이벤트가 TICN 손실률 변경으로 이어지는 것을 막으며, UAV는 비허용 명령과 위조 heartbeat를 차단한다. 차단된 시도는 `DEF` 이벤트와 JSON evidence로 남는다.
+
 ### 실행
 
 ```powershell
@@ -205,14 +207,14 @@ docker compose --profile defense-lab up --build dah-defense
 
 | 탐지 시나리오 | 대응 |
 |---|---|
-| `COMMAND_INJECTION`, `UNKNOWN_COMMAND` | 명령 신뢰 게이트 차단 |
-| `FORCED_LAND_ATTEMPT` | 차단 후 RTL 명령 |
+| `COMMAND_INJECTION`, `UNKNOWN_COMMAND` | UAV/Dashboard 명령 신뢰 게이트 차단 |
+| `FORCED_LAND_ATTEMPT` | LAND/SET_MODE 차단 후 RTL 명령 |
 | `REPLAY_ATTACK` | SAFE_MODE |
 | `GPS_SPOOFING` | INS fallback |
-| `EW_LINK_DEGRADATION` | 모니터링 지속 |
-| `JAMMING_CRITICAL` | TICN 채널 clear/hop |
-| `FAILSAFE_INDUCTION` | 위치 유지 권고 후 필요 시 RTL |
-| `PROTOCOL_FRAME_INTEGRITY` | 변조 프레임 차단 |
+| `EW_LINK_DEGRADATION` | Router EW/JAM 게이트 유지, 위치 유지 |
+| `JAMMING_CRITICAL` | Router EW/JAM 게이트 유지, TICN 채널 clear/hop |
+| `FAILSAFE_INDUCTION` | Dashboard fail-safe overlay 차단, 위치 유지 후 필요 시 RTL |
+| `PROTOCOL_FRAME_INTEGRITY` | 변조 프레임 이벤트 격리 및 차단 |
 
 ## 통신 구현
 

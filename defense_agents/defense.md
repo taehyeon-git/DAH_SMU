@@ -86,7 +86,7 @@ dah-defense (172.31.50.60)
 
 | Agent | 파일 | 역할 | 출력 |
 |---|---|---|---|
-| `DefensePolicyAgent` | `policy_agent.py` | 자산, 허용 SYS_ID, 명령 allowlist, threshold, lab-only surface 정책 로드 | policy event |
+| `DefensePolicyAgent` | `policy_agent.py` | 자산, 허용 SYS_ID, 명령 allowlist, threshold, lab-only surface 정책 로드 후 Dashboard/Router/UAV 예방 게이트 활성화 | policy event |
 | `DefenseDetectionAgent` | `detection_agent.py` | command injection, replay, GPS spoofing, jamming, fail-safe, protocol integrity 탐지 | `Threat` |
 | `DefenseResponseAgent` | `response_agent.py` | threat 시나리오에 맞는 safe playbook 선택 및 실행 | `DefenseAction` |
 | `DefenseRecoveryAgent` | `recovery_agent.py` | 대응 후 Dashboard 상태 확인, incident/policy report 저장 | JSON report |
@@ -115,7 +115,7 @@ All agents     -> DashboardEventBus -> Dashboard LOG
 | EW 재밍/링크 저하 | Router/Dashboard `loss_pct` | `EW_LINK_DEGRADATION`, `JAMMING_CRITICAL` | `FREQ_HOP`, `HOLD_POSITION` |
 | protocol tamper alert | Dashboard agent event | `PROTOCOL_FRAME_INTEGRITY` | `BLOCK_COMMAND`, monitoring |
 
-공격 에이전트가 취약점 기반 이벤트를 만들면, 방어 에이전트는 같은 이벤트를 관측해 탐지, 대응, 복구 로그를 남긴다. 보고서에는 공격 로그와 방어 로그를 같은 timeline으로 배치하면 공격-방어 연계성이 명확해진다.
+공격 에이전트가 취약점 기반 이벤트를 만들면, 방어 에이전트는 같은 이벤트를 관측해 탐지, 대응, 복구 로그를 남긴다. 방어가 먼저 실행된 상태라면 Policy/Response가 켠 예방 게이트 때문에 공격 이벤트는 Dashboard/Router/UAV에서 차단되고, 차단 사실이 `DEF` 이벤트로 다시 탐지된다.
 
 ## 6. 정책 기준선
 
@@ -163,15 +163,23 @@ All agents     -> DashboardEventBus -> Dashboard LOG
 
 | Playbook | 동작 | 범위 |
 |---|---|---|
-| `BLOCK_COMMAND` | command trust gate 차단 로그 기록 | 이벤트 기반 |
+| `BLOCK_COMMAND` | UAV 명령 신뢰 게이트와 Dashboard 공격 이벤트 차단 게이트 활성화 | Docker UAV / Dashboard only |
 | `FORCE_RTL` | lab UAV에 `MAV_CMD_NAV_RETURN_TO_LAUNCH` 전송 | Docker UAV only |
 | `SAFE_MODE` | lab UAV safe mode 전환 시도 | Docker UAV only |
-| `FREQ_HOP` | Router `/api/ticn/clear`로 VHF/UHF clear | Router simulation only |
+| `FREQ_HOP` | Router 재밍/지연 차단 게이트 활성화 후 VHF/UHF/HF clear | Router simulation only |
 | `INS_FALLBACK` | GPS 신뢰도 저하 및 INS fallback 기록 | 이벤트 기반 |
-| `HOLD_POSITION` | 위치 유지 권고 로그 기록 | 이벤트 기반 |
+| `HOLD_POSITION` | Dashboard fail-safe overlay 차단 게이트 유지, 위치 유지 권고 로그 기록 | Dashboard / event 기반 |
 | `IGNORE_AND_MONITOR` | 모니터링 지속 | 이벤트 기반 |
 
-`FORCE_RTL`, `SAFE_MODE`도 실제 기체가 아니라 Docker lab UAV에만 전달된다.
+`FORCE_RTL`, `SAFE_MODE`도 실제 기체가 아니라 Docker lab UAV에만 전달된다. 방어 게이트는 실제 RF/외부 네트워크 차단이 아니라 로컬 Docker 테스트베드 내부의 lab event와 simulated command path만 차단한다.
+
+### 실제 차단 지점
+
+| 차단 지점 | API / 입력 | 방어 효과 |
+|---|---|---|
+| Dashboard guard | `/api/defense/rules`, `/api/agent-event` | 공격 이벤트가 fail-safe overlay나 mission state 변경으로 이어지지 않도록 차단 |
+| Router guard | `/api/defense/rules`, UDP `14590` | EW/JAM lab event와 delay event가 TICN 손실률 변경으로 이어지지 않도록 차단 |
+| UAV guard | `/api/defense/rules`, UDP command `14551` | 비허용 SYS_ID, `MAV_CMD_NAV_LAND`, `MAV_CMD_DO_SET_MODE`, CRITICAL/EMERGENCY heartbeat 위조를 차단 |
 
 ## 9. 복구 및 산출물
 
@@ -179,9 +187,10 @@ All agents     -> DashboardEventBus -> Dashboard LOG
 
 | 대응 | 확인 기준 |
 |---|---|
-| `FREQ_HOP` | `loss_pct < jamming_loss_critical` |
+| `FREQ_HOP` | `loss_pct < jamming_loss_critical` 및 Router guard 활성 |
 | `INS_FALLBACK` | `gps_spoofed=false` |
-| `FORCE_RTL`, `SAFE_MODE`, `HOLD_POSITION` | `mission_phase`와 UAV 상태를 evidence로 기록 |
+| `BLOCK_COMMAND` | UAV guard 또는 Dashboard guard 활성 |
+| `FORCE_RTL`, `SAFE_MODE`, `HOLD_POSITION` | `mission_phase`, UAV 상태, Dashboard/UAV guard 상태를 evidence로 기록 |
 
 산출물:
 
@@ -248,10 +257,11 @@ Invoke-RestMethod http://localhost:8084/api/ticn/status
 
 | 위치 | 확인 내용 |
 |---|---|
-| Dashboard LOG | `DEF` 이벤트가 탐지 -> 대응 -> 복구 순서로 남는지 |
+| Dashboard LOG | `DEF` 이벤트가 탐지 -> 대응 -> 복구 순서로 남는지, 공격 이벤트가 `BLOCKED`로 기록되는지 |
 | `dah-defense` 로그 | `[DEFENSE][...]` 이벤트 출력 |
 | `output/defense_incident_report.json` | 사고 timeline과 대응 결과 |
 | `output/defense_policy_recommendations.json` | 정책 개선안 |
+| 상태 API | `defense.active=true`, `blocked_events` 증가 여부 |
 
 ## 12. 파일 구조
 

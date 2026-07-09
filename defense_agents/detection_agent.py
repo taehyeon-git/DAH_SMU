@@ -217,6 +217,58 @@ class DefenseDetectionAgent:
             status = str(event.get("status", ""))
             agent_type = str(event.get("agent_type", ""))
             detail = str(event.get("detail", ""))
+            original_type = str(event.get("original_message_type", ""))
+            joined = " ".join([message, source, status, agent_type, detail, original_type])
+            if status in {"BLOCKED", "BLOCKED_BY_DEFENSE"} or source.endswith("DEFENSE-GUARD"):
+                if "TICN" in joined or "재밍" in joined or "EW_LINK" in joined or "link_degradation" in joined:
+                    self._emit_threat(
+                        scenario="EW_LINK_DEGRADATION",
+                        severity="HIGH",
+                        confidence=0.9,
+                        reason="방어 게이트가 전술 링크 저하/재밍 시도를 차단",
+                        evidence={"event": event},
+                        playbook="FREQ_HOP",
+                    )
+                    continue
+                if "MAVLink" in joined or "COMMAND" in joined or "HEARTBEAT" in joined or "UAV" in joined or "mavlink_injection" in joined:
+                    scenario = "FORCED_LAND_ATTEMPT" if "LAND" in joined else "COMMAND_INJECTION"
+                    self._emit_threat(
+                        scenario=scenario,
+                        severity="HIGH",
+                        confidence=0.9,
+                        reason="방어 게이트가 UAV 명령/상태 위조 시도를 차단",
+                        evidence={"event": event},
+                        playbook="BLOCK_COMMAND",
+                    )
+                    continue
+                if "protocol" in joined.lower() or "CRC" in joined or "무결성" in joined:
+                    self._emit_threat(
+                        scenario="PROTOCOL_FRAME_INTEGRITY",
+                        severity="HIGH",
+                        confidence=0.86,
+                        reason="방어 게이트가 protocol integrity alert를 격리",
+                        evidence={"event": event},
+                        playbook="BLOCK_COMMAND",
+                    )
+                    continue
+
+            if (
+                status in {"COMMAND_INJECTED", "GCS_STATUS_SPOOFED", "HB_SUPPRESSED"}
+                or agent_type == "dah-mavlink-injector"
+                or "MAVLINK_COMMAND_INJECTION" in detail
+                or "MAVLINK_STATUS_SPOOF" in detail
+                or "HB_TIMEOUT_INDUCTION" in detail
+            ):
+                scenario = "FORCED_LAND_ATTEMPT" if "COMMAND_INJECTION" in detail or status == "COMMAND_INJECTED" else "COMMAND_INJECTION"
+                self._emit_threat(
+                    scenario=scenario,
+                    severity="HIGH",
+                    confidence=0.88,
+                    reason="Dashboard agent event에서 MAVLink 명령/상태 위조 시도 관측",
+                    evidence={"event": event},
+                    playbook="BLOCK_COMMAND",
+                )
+                continue
             if (
                 status in {"EW_LINK_DEGRADED", "FAILSAFE_TRIGGERED", "FAILSAFE_LAND"}
                 or agent_type == "dah-jammer"

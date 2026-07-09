@@ -12,6 +12,9 @@ services:
       CC_HOST: 172.31.50.30        # companion computer IP
       CC_PORT: "14550"
       CMD_PORT: "14551"
+      DEFENSE_STATUS_PORT: "8080"
+      DASHBOARD_EVENT_HOST: 172.31.50.70
+      DASHBOARD_EVENT_PORT: "14571"
     networks:
       dah-net:
         ipv4_address: 172.31.50.10         # UAV 고정 IP
@@ -214,6 +217,7 @@ services:
       ROUTER_PORT: "8080"
       UAV_HOST: 172.31.50.10
       UAV_PORT: "14551"
+      UAV_DEFENSE_PORT: "8080"
       DEFENSE_POLICY_PATH: /app/defense_agents/policies/default_policy.json
       DEFENSE_OUTPUT_DIR: /app/output
     volumes:

@@ -1,12 +1,17 @@
 import json
 import math
+import os
 import threading
 import socket
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pymavlink import mavutil
 
 DASHBOARD_URL = "http://dah-dashboard:8080"
+DEFENSE_STATUS_PORT = int(os.getenv("DEFENSE_STATUS_PORT", "8080"))
+DASHBOARD_EVENT_HOST = os.getenv("DASHBOARD_EVENT_HOST", "172.31.50.70")
+DASHBOARD_EVENT_PORT = int(os.getenv("DASHBOARD_EVENT_PORT", "14571"))
 LINK_LOST_THRESHOLD = 75   # loss_pct 이상이면 Link Lost (VHF 사거리 초과 시 30~40% 정상)
 
 # ─────────────────────────────────────────
@@ -46,6 +51,134 @@ _resume_until = 0.0    # RESUME 명령 이후 link_monitor 억제 종료 시각
 # GCS heartbeat 감시용
 _gcs_hb_last  = time.time()
 GCS_HB_TIMEOUT = 5.0   # 이 시간 동안 GCS heartbeat 없으면 fail-safe
+_defense_state = {
+    "enabled": False,
+    "block_unsafe_commands": False,
+    "block_spoofed_heartbeat": False,
+    "allowed_sys_ids": [255],
+    "restricted_commands": ["MAV_CMD_NAV_LAND", "MAV_CMD_DO_SET_MODE"],
+    "expires_at": 0.0,
+    "source": None,
+    "reason": None,
+    "blocked_events": 0,
+}
+_defense_lock = threading.Lock()
+
+
+def defense_active() -> bool:
+    with _defense_lock:
+        if not _defense_state["enabled"]:
+            return False
+        if _defense_state["expires_at"] and time.time() > _defense_state["expires_at"]:
+            _defense_state["enabled"] = False
+            return False
+        return True
+
+
+def defense_snapshot() -> dict:
+    with _defense_lock:
+        snapshot = dict(_defense_state)
+    snapshot["active"] = defense_active()
+    if snapshot.get("expires_at"):
+        snapshot["remaining_sec"] = max(0.0, round(snapshot["expires_at"] - time.time(), 1))
+    return snapshot
+
+
+def apply_defense_rules(payload: dict) -> dict:
+    ttl = float(payload.get("ttl_sec", payload.get("duration_sec", 3600)) or 0)
+    with _defense_lock:
+        _defense_state["enabled"] = bool(payload.get("enabled", True))
+        _defense_state["block_unsafe_commands"] = bool(payload.get("block_unsafe_commands", _defense_state["block_unsafe_commands"]))
+        _defense_state["block_spoofed_heartbeat"] = bool(payload.get("block_spoofed_heartbeat", _defense_state["block_spoofed_heartbeat"]))
+        _defense_state["allowed_sys_ids"] = list(payload.get("allowed_sys_ids", _defense_state["allowed_sys_ids"]))
+        _defense_state["restricted_commands"] = list(payload.get("restricted_commands", _defense_state["restricted_commands"]))
+        _defense_state["expires_at"] = time.time() + ttl if ttl > 0 and _defense_state["enabled"] else 0.0
+        _defense_state["source"] = payload.get("source", "defense_agent")
+        _defense_state["reason"] = payload.get("reason", "defense policy")
+    return defense_snapshot()
+
+
+def _mav_cmd_name(cmd: int) -> str:
+    try:
+        return mavutil.mavlink.enums["MAV_CMD"][int(cmd)].name
+    except Exception:
+        return f"MAV_CMD_{cmd}"
+
+
+def emit_defense_block(reason: str, evidence: dict) -> None:
+    with _defense_lock:
+        _defense_state["blocked_events"] += 1
+    event = {
+        "platform_type": "AGENT",
+        "platform_id": "DEF-001",
+        "agent_type": "DEF",
+        "source": "UAV-DEFENSE-GUARD",
+        "message": "UAV 명령/상태 위조 시도 차단",
+        "detail": json.dumps({"reason": reason, **evidence}, ensure_ascii=False),
+        "level": "warn",
+        "status": "BLOCKED",
+        "time": time.strftime("%H:%M:%S"),
+    }
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(json.dumps(event, ensure_ascii=False).encode("utf-8"), (DASHBOARD_EVENT_HOST, DASHBOARD_EVENT_PORT))
+        sock.close()
+    except Exception:
+        pass
+    print(f"[송골매] 🛡️ DEFENSE BLOCK: {reason} {evidence}")
+
+
+def defense_blocks_heartbeat(src: int, system_status: int) -> bool:
+    if not defense_active() or not _defense_state.get("block_spoofed_heartbeat"):
+        return False
+    allowed = set(int(item) for item in _defense_state.get("allowed_sys_ids", [255]))
+    unsafe_status = system_status in {
+        mavutil.mavlink.MAV_STATE_CRITICAL,
+        mavutil.mavlink.MAV_STATE_EMERGENCY,
+    }
+    return src not in allowed or unsafe_status
+
+
+def defense_blocks_command(src: int, cmd: int) -> bool:
+    if not defense_active() or not _defense_state.get("block_unsafe_commands"):
+        return False
+    allowed = set(int(item) for item in _defense_state.get("allowed_sys_ids", [255]))
+    restricted = set(_defense_state.get("restricted_commands", []))
+    cmd_name = _mav_cmd_name(cmd)
+    return src not in allowed or cmd_name in restricted
+
+
+def defense_http_server():
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_): pass
+
+        def _send_json(self, code: int, payload: dict):
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/api/defense/status":
+                self._send_json(200, defense_snapshot())
+            else:
+                self._send_json(404, {"error": "not found"})
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                payload = {}
+            if self.path == "/api/defense/rules":
+                self._send_json(200, {"ok": True, "defense": apply_defense_rules(payload)})
+            else:
+                self._send_json(404, {"error": "not found"})
+
+    HTTPServer(("0.0.0.0", DEFENSE_STATUS_PORT), Handler).serve_forever()
 
 
 def link_monitor():
@@ -100,8 +233,14 @@ def listen_for_commands():
 
         # GCS heartbeat 수신 → 타임스탬프 갱신
         if msg_type == 'HEARTBEAT' and src == 255:
-            _gcs_hb_last = time.time()
             gcs_status = msg.system_status
+            if defense_blocks_heartbeat(src, gcs_status):
+                emit_defense_block(
+                    "unsafe_gcs_heartbeat_status",
+                    {"src_sys": src, "system_status": int(gcs_status), "message_type": "HEARTBEAT"},
+                )
+                continue
+            _gcs_hb_last = time.time()
             if gcs_status == mavutil.mavlink.MAV_STATE_CRITICAL:
                 print(f"[송골매] ⚠️  GCS CRITICAL 상태 수신 → Fail-safe LOITER")
                 status['mode'] = 'LOITER'
@@ -114,6 +253,13 @@ def listen_for_commands():
             continue
 
         cmd = msg.command
+        if defense_blocks_command(src, cmd):
+            emit_defense_block(
+                "restricted_or_untrusted_command",
+                {"src_sys": src, "cmd": _mav_cmd_name(cmd), "cmd_id": int(cmd), "message_type": "COMMAND_LONG"},
+            )
+            continue
+
         if cmd == mavutil.mavlink.MAV_CMD_NAV_LAND:
             print(f"[송골매] ⚠️  LAND 명령 수신 SYS_ID={src} → 착륙 시작")
             status['mode'] = 'LANDING'
@@ -153,6 +299,7 @@ def main():
     threading.Thread(target=listen_for_commands,      daemon=True).start()
     threading.Thread(target=link_monitor,             daemon=True).start()
     threading.Thread(target=gcs_heartbeat_watchdog,   daemon=True).start()
+    threading.Thread(target=defense_http_server,       daemon=True).start()
 
     mav = mavutil.mavlink_connection(f'udpout:{UAV_HOST}:{UAV_PORT}', source_system=SYS_ID)
     mav.port.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

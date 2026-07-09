@@ -20,6 +20,8 @@ class DefenseRecoveryAgent:
         self.context = context
         self.ids = ids
         self.dashboard_url = f"http://{os.getenv('DASHBOARD_HOST', 'dah-dashboard')}:8080"
+        self.router_url = f"http://{os.getenv('ROUTER_HOST', 'dah-tactical-router')}:{os.getenv('ROUTER_PORT', '8080')}"
+        self.uav_defense_url = f"http://{os.getenv('UAV_HOST', '172.31.50.10')}:{os.getenv('UAV_DEFENSE_PORT', '8080')}"
         self.output_dir = os.getenv("DEFENSE_OUTPUT_DIR", "output")
         self.incident_id = self.ids.incident_id()
         self.started_at = utc_now()
@@ -47,6 +49,9 @@ class DefenseRecoveryAgent:
 
     def _verify_recovery(self, action: DefenseAction) -> RecoveryObservation:
         live = http_get_json(f"{self.dashboard_url}/api/live")
+        dashboard_guard = http_get_json(f"{self.dashboard_url}/api/defense/status")
+        router_guard = http_get_json(f"{self.router_url}/api/defense/status")
+        uav_guard = http_get_json(f"{self.uav_defense_url}/api/defense/status")
         platforms = {item.get("platform_id"): item for item in live.get("platforms", [])} if live else {}
         uav = platforms.get("UAV-001", {})
         ticn = uav.get("ticn", {}) if isinstance(uav.get("ticn"), dict) else {}
@@ -58,13 +63,16 @@ class DefenseRecoveryAgent:
         detail_parts = []
         if action.playbook == "FREQ_HOP":
             critical = float(self.context.policy.get("thresholds", {}).get("jamming_loss_critical", 50))
-            recovered = loss_pct < critical
-            detail_parts.append(f"loss_pct={loss_pct}, critical={critical}")
+            recovered = loss_pct < critical and bool(router_guard.get("active", True))
+            detail_parts.append(f"loss_pct={loss_pct}, critical={critical}, router_guard={router_guard.get('active')}")
         elif action.playbook == "INS_FALLBACK":
             recovered = not gps_spoofed
             detail_parts.append(f"gps_spoofed={gps_spoofed}")
         elif action.playbook in {"FORCE_RTL", "SAFE_MODE", "HOLD_POSITION"}:
-            detail_parts.append(f"mission_phase={phase}")
+            detail_parts.append(f"mission_phase={phase}, dashboard_guard={dashboard_guard.get('active')}, uav_guard={uav_guard.get('active')}")
+        elif action.playbook == "BLOCK_COMMAND":
+            recovered = bool(uav_guard.get("active", True)) or bool(dashboard_guard.get("active", True))
+            detail_parts.append(f"dashboard_guard={dashboard_guard.get('active')}, uav_guard={uav_guard.get('active')}")
         else:
             detail_parts.append("monitoring state recorded")
 
@@ -73,7 +81,16 @@ class DefenseRecoveryAgent:
             incident_id=self.incident_id,
             status=status,
             detail="; ".join(detail_parts),
-            evidence={"action": action.to_dict(), "uav": uav, "mission_phase": phase},
+            evidence={
+                "action": action.to_dict(),
+                "uav": uav,
+                "mission_phase": phase,
+                "guards": {
+                    "dashboard": dashboard_guard,
+                    "router": router_guard,
+                    "uav": uav_guard,
+                },
+            },
         )
 
     def _send_recovery_event(self, observation: RecoveryObservation) -> None:

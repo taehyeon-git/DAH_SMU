@@ -43,10 +43,101 @@ mission_state: dict = {
     "cmd_at":  None,
     "cmd_by":  "SYSTEM",
 }
+defense_state: dict = {
+    "enabled": False,
+    "block_attack_events": False,
+    "block_failsafe_overlay": False,
+    "block_protocol_alerts": False,
+    "expires_at": 0.0,
+    "source": None,
+    "reason": None,
+    "blocked_events": 0,
+}
+_defense_lock = threading.Lock()
 
 
 def update_mission_state(update: dict):
     mission_state.update(update)
+
+
+def defense_active() -> bool:
+    with _defense_lock:
+        if not defense_state["enabled"]:
+            return False
+        if defense_state["expires_at"] and time.time() > defense_state["expires_at"]:
+            defense_state["enabled"] = False
+            return False
+        return True
+
+
+def defense_snapshot() -> dict:
+    with _defense_lock:
+        snapshot = dict(defense_state)
+    snapshot["active"] = defense_active()
+    if snapshot.get("expires_at"):
+        snapshot["remaining_sec"] = max(0.0, round(snapshot["expires_at"] - time.time(), 1))
+    return snapshot
+
+
+def apply_defense_rules(payload: dict) -> dict:
+    ttl = float(payload.get("ttl_sec", payload.get("duration_sec", 3600)) or 0)
+    with _defense_lock:
+        defense_state["enabled"] = bool(payload.get("enabled", True))
+        defense_state["block_attack_events"] = bool(payload.get("block_attack_events", defense_state["block_attack_events"]))
+        defense_state["block_failsafe_overlay"] = bool(payload.get("block_failsafe_overlay", defense_state["block_failsafe_overlay"]))
+        defense_state["block_protocol_alerts"] = bool(payload.get("block_protocol_alerts", defense_state["block_protocol_alerts"]))
+        defense_state["expires_at"] = time.time() + ttl if ttl > 0 and defense_state["enabled"] else 0.0
+        defense_state["source"] = payload.get("source", "defense_agent")
+        defense_state["reason"] = payload.get("reason", "defense policy")
+    return defense_snapshot()
+
+
+def attack_event_blocked(payload: dict) -> bool:
+    if not defense_active():
+        return False
+    message_type = payload.get("message_type", "")
+    snapshot = defense_snapshot()
+    if message_type == "link_degradation_alert":
+        return bool(snapshot.get("block_attack_events") or snapshot.get("block_failsafe_overlay"))
+    if message_type == "mavlink_injection_alert":
+        return bool(snapshot.get("block_attack_events"))
+    if message_type == "protocol_integrity_alert":
+        return bool(snapshot.get("block_protocol_alerts") or snapshot.get("block_attack_events"))
+    return False
+
+
+def record_defense_block(payload: dict) -> dict:
+    with _defense_lock:
+        defense_state["blocked_events"] += 1
+        blocked_count = defense_state["blocked_events"]
+    message_type = payload.get("message_type", "agent_event")
+    status = payload.get("status", payload.get("integrity_status", "ATTEMPT"))
+    message = f"공격 이벤트 차단: {message_type}"
+    detail = (
+        f"original_status={status} source={payload.get('source', 'unknown')} "
+        f"agent={payload.get('agent_type', '')} evidence={payload.get('evidence', {})}"
+    )
+    event = {
+        "time": time.strftime("%H:%M:%S"),
+        "level": "warn",
+        "agent_type": "DEF",
+        "source": "DASHBOARD-DEFENSE-GUARD",
+        "message": message,
+        "detail": detail,
+        "status": "BLOCKED",
+        "blocked_count": blocked_count,
+        "original_message_type": message_type,
+    }
+    agent_events.appendleft(event)
+    local_events.appendleft({
+        "type": "defense",
+        "time": event["time"],
+        "level": "warn",
+        "source": event["source"],
+        "message": message,
+        "status": "BLOCKED",
+    })
+    return event
 
 
 def is_failsafe_sim_active():
@@ -186,6 +277,9 @@ def apply_failsafe_simulation(platforms: list[dict]) -> list[dict]:
 
 
 def record_agent_event(payload: dict):
+    if attack_event_blocked(payload):
+        return {"blocked": True, "event": record_defense_block(payload)}
+
     message_type = payload.get("message_type", "")
     severity = payload.get("severity", payload.get("level", "info"))
     status = payload.get("integrity_status", payload.get("status", "INFO"))
@@ -242,6 +336,7 @@ def record_agent_event(payload: dict):
         "message": message,
         "status": status,
     })
+    return {"blocked": False}
 
 PHASE_MAP = {
     "HOLD":    {"phase": "LOITER",     "desc": "지정 구역 선회 대기",       "advice": "현재 좌표 유지, 추가 명령 대기"},
@@ -661,9 +756,11 @@ def live():
             "status": "degraded",
             "message": "GCS / Upper C2 unavailable (direct UDP only)",
             "platforms": apply_failsafe_simulation(list(router_platforms.values())),
-            "events": [],
+            "events": list(local_events)[:50],
+            "agent_events": list(agent_events)[:100],
             "mission_state": mission_state,
             "failsafe_simulation": current_failsafe_snapshot(),
+            "defense": defense_snapshot(),
         })
     # 플랫폼: GCS + UDP 직수신 병합 (UDP 직수신 우선)
     mc_platforms = {p["platform_id"]: p for p in dashboard.get("platforms", [])}
@@ -684,6 +781,7 @@ def live():
         "gcs_direct":    len(router_platforms),
         "mission_state": mission_state,
         "failsafe_simulation": current_failsafe_snapshot(),
+        "defense": defense_snapshot(),
     })
 
 
@@ -717,8 +815,30 @@ def failsafe_policy():
 @app.post("/api/agent-event")
 def ingest_agent_event():
     payload = request.get_json(force=True, silent=True) or {}
-    record_agent_event(payload)
-    return jsonify({"ok": True, "agent_events": len(agent_events)})
+    result = record_agent_event(payload)
+    return jsonify({"ok": True, "agent_events": len(agent_events), **(result or {})})
+
+
+@app.get("/api/defense/status")
+def defense_status():
+    return jsonify(defense_snapshot())
+
+
+@app.post("/api/defense/rules")
+def defense_rules():
+    payload = request.get_json(force=True, silent=True) or {}
+    state = apply_defense_rules(payload)
+    event = {
+        "time": time.strftime("%H:%M:%S"),
+        "level": "info",
+        "agent_type": "DEF",
+        "source": payload.get("source", "DASHBOARD-DEFENSE-GUARD"),
+        "message": "Dashboard 방어 게이트 갱신",
+        "detail": json.dumps(state, ensure_ascii=False),
+        "status": "OK",
+    }
+    agent_events.appendleft(event)
+    return jsonify({"ok": True, "defense": state})
 
 
 @app.get("/health")

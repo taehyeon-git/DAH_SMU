@@ -23,6 +23,16 @@ from ticn import TMMRNode, TICNNetwork, SharedState
 # 지연 주입 상태 (delay attack)
 _delay_state = {"delay_ms": 0, "expires_at": 0.0}
 _delay_lock  = threading.Lock()
+_defense_state = {
+    "enabled": False,
+    "block_jam_events": False,
+    "block_delay_events": False,
+    "expires_at": 0.0,
+    "source": None,
+    "reason": None,
+    "blocked_events": 0,
+}
+_defense_lock = threading.Lock()
 
 
 def get_inject_delay_ms() -> int:
@@ -30,6 +40,71 @@ def get_inject_delay_ms() -> int:
         if time.time() < _delay_state["expires_at"]:
             return _delay_state["delay_ms"]
         return 0
+
+
+def _defense_active() -> bool:
+    with _defense_lock:
+        if not _defense_state["enabled"]:
+            return False
+        if _defense_state["expires_at"] and time.time() > _defense_state["expires_at"]:
+            _defense_state["enabled"] = False
+            return False
+        return True
+
+
+def _defense_snapshot() -> dict:
+    with _defense_lock:
+        snapshot = dict(_defense_state)
+    snapshot["active"] = _defense_active()
+    if snapshot.get("expires_at"):
+        snapshot["remaining_sec"] = max(0.0, round(snapshot["expires_at"] - time.time(), 1))
+    return snapshot
+
+
+def _apply_defense_rules(body: dict) -> dict:
+    ttl = float(body.get("ttl_sec", body.get("duration_sec", 3600)) or 0)
+    with _defense_lock:
+        _defense_state["enabled"] = bool(body.get("enabled", True))
+        _defense_state["block_jam_events"] = bool(body.get("block_jam_events", _defense_state["block_jam_events"]))
+        _defense_state["block_delay_events"] = bool(body.get("block_delay_events", _defense_state["block_delay_events"]))
+        _defense_state["expires_at"] = time.time() + ttl if ttl > 0 and _defense_state["enabled"] else 0.0
+        _defense_state["source"] = body.get("source", "defense_agent")
+        _defense_state["reason"] = body.get("reason", "defense policy")
+    return _defense_snapshot()
+
+
+def _defense_blocks(event_type: str) -> bool:
+    if not _defense_active():
+        return False
+    snapshot = _defense_snapshot()
+    if event_type == "jam":
+        return bool(snapshot.get("block_jam_events"))
+    if event_type == "delay":
+        return bool(snapshot.get("block_delay_events"))
+    return False
+
+
+def _record_defense_block(event_type: str, evidence: dict) -> None:
+    with _defense_lock:
+        _defense_state["blocked_events"] += 1
+    event = {
+        "platform_type": "AGENT",
+        "platform_id": "DEF-001",
+        "agent_type": "DEF",
+        "source": "ROUTER-DEFENSE-GUARD",
+        "message": "TICN 재밍 이벤트 차단" if event_type == "jam" else "TICN 지연 주입 이벤트 차단",
+        "detail": json.dumps(evidence, ensure_ascii=False),
+        "level": "warn",
+        "status": "BLOCKED",
+        "time": time.strftime("%H:%M:%S"),
+    }
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(json.dumps(event, ensure_ascii=False).encode("utf-8"), (DASHBOARD_HOST, DASHBOARD_PORT))
+        sock.close()
+    except Exception:
+        pass
+    print(f"[TICN]  🛡️ DEFENSE BLOCK {event_type}: {evidence}")
 
 
 # ── 포트 설정 ─────────────────────────────────────────────────────────────
@@ -80,8 +155,11 @@ def make_http_handler(shared: SharedState, tmmr_nodes: dict, ticn: TICNNetwork):
                     "ticn": ticn.status(),
                     "jammed_channels": shared.jammed_remaining(),
                     "recent_events":   shared.recent_events(15),
+                    "defense": _defense_snapshot(),
                 }).encode()
                 self._send(200, body)
+            elif self.path == "/api/defense/status":
+                self._send(200, json.dumps(_defense_snapshot()).encode())
             else:
                 self._send(404, b'{"error":"not found"}')
 
@@ -91,6 +169,11 @@ def make_http_handler(shared: SharedState, tmmr_nodes: dict, ticn: TICNNetwork):
 
             if self.path == "/api/ticn/jam":
                 ch, dur = body.get("channel", "VHF"), float(body.get("duration", 30))
+                if _defense_blocks("jam"):
+                    evidence = {"channel": ch, "duration": dur, "path": self.path, "reason": "router defense guard active"}
+                    _record_defense_block("jam", evidence)
+                    self._send(403, json.dumps({"ok": False, "blocked": True, "defense": _defense_snapshot(), "evidence": evidence}).encode())
+                    return
                 shared.jam(ch, dur)
                 self._send(200, json.dumps({"ok": True, "channel": ch, "duration": dur}).encode())
             elif self.path == "/api/ticn/clear":
@@ -100,11 +183,20 @@ def make_http_handler(shared: SharedState, tmmr_nodes: dict, ticn: TICNNetwork):
             elif self.path == "/api/ticn/delay":
                 delay_ms = int(body.get("delay_ms", 0))
                 duration = float(body.get("duration", 0))
+                if delay_ms > 0 and _defense_blocks("delay"):
+                    evidence = {"delay_ms": delay_ms, "duration": duration, "path": self.path, "reason": "router defense guard active"}
+                    _record_defense_block("delay", evidence)
+                    self._send(403, json.dumps({"ok": False, "blocked": True, "defense": _defense_snapshot(), "evidence": evidence}).encode())
+                    return
                 with _delay_lock:
                     _delay_state["delay_ms"]  = delay_ms
                     _delay_state["expires_at"] = time.time() + duration if delay_ms > 0 else 0.0
                 print(f"[TICN]  DELAY 주입: {delay_ms}ms  {duration}s")
                 self._send(200, json.dumps({"ok": True, "delay_ms": delay_ms, "duration": duration}).encode())
+            elif self.path == "/api/defense/rules":
+                state = _apply_defense_rules(body)
+                shared.log({"layer": "DEFENSE", "event": "ROUTER_GUARD_UPDATED", "state": state})
+                self._send(200, json.dumps({"ok": True, "defense": state}).encode())
             else:
                 self._send(404, b'{"error":"not found"}')
 
@@ -136,7 +228,12 @@ def jam_udp_listener(shared: SharedState):
         try:
             data, _ = sock.recvfrom(1024)
             msg = json.loads(data.decode())
-            shared.jam(msg.get("channel", "VHF"), float(msg.get("duration", 30)))
+            channel = msg.get("channel", "VHF")
+            duration = float(msg.get("duration", 30))
+            if _defense_blocks("jam"):
+                _record_defense_block("jam", {"channel": channel, "duration": duration, "transport": "udp-json"})
+                continue
+            shared.jam(channel, duration)
         except Exception as e:
             print(f"[TICN]  JAM 파싱 오류: {e}")
 

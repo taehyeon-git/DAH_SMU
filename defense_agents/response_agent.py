@@ -25,6 +25,8 @@ class DefenseResponseAgent:
         self.ids = ids
         self.uav_host = os.getenv("UAV_HOST", "172.31.50.10")
         self.uav_port = int(os.getenv("UAV_PORT", "14551"))
+        self.uav_defense_url = f"http://{self.uav_host}:{os.getenv('UAV_DEFENSE_PORT', '8080')}"
+        self.dashboard_url = f"http://{os.getenv('DASHBOARD_HOST', 'dah-dashboard')}:8080"
         self.gcs_sys_id = int(os.getenv("GCS_SYS_ID", "255"))
         self.router_url = f"http://{os.getenv('ROUTER_HOST', 'dah-tactical-router')}:{os.getenv('ROUTER_PORT', '8080')}"
 
@@ -53,6 +55,8 @@ class DefenseResponseAgent:
         evidence: dict[str, Any] = {"threat": threat.to_dict()}
 
         if playbook == "BLOCK_COMMAND":
+            evidence["uav_guard"] = self._enforce_uav_guard()
+            evidence["dashboard_guard"] = self._enforce_dashboard_guard()
             detail += " | command trust gate marked suspicious in lab event stream"
         elif playbook == "FORCE_RTL":
             evidence["mavlink_result"] = self._send_rtl()
@@ -61,11 +65,13 @@ class DefenseResponseAgent:
             evidence["mavlink_result"] = self._send_safe_mode()
             detail += " | predefined SAFE_MODE command attempted to lab UAV"
         elif playbook == "FREQ_HOP":
+            evidence["router_guard"] = self._enforce_router_guard()
             evidence["router_result"] = self._freq_hop()
             detail += " | Router TICN clear/hop simulation executed"
         elif playbook == "INS_FALLBACK":
             detail += " | GPS trust reduced, INS fallback simulated"
         elif playbook == "HOLD_POSITION":
+            evidence["dashboard_guard"] = self._enforce_dashboard_guard()
             detail += " | hold-position recommendation emitted, no arbitrary command generated"
         else:
             status = "OK"
@@ -123,12 +129,54 @@ class DefenseResponseAgent:
 
     def _freq_hop(self) -> list[dict[str, Any]]:
         results = []
-        for channel in ("VHF", "UHF"):
+        for channel in ("VHF", "UHF", "HF"):
             results.append({
                 "channel": channel,
                 "result": http_post_json(f"{self.router_url}/api/ticn/clear", {"channel": channel}),
             })
         return results
+
+    def _enforce_router_guard(self) -> dict[str, Any]:
+        return http_post_json(
+            f"{self.router_url}/api/defense/rules",
+            {
+                "enabled": True,
+                "block_jam_events": True,
+                "block_delay_events": True,
+                "ttl_sec": 3600,
+                "source": self.source,
+                "reason": "Response Agent playbook reinforcement",
+            },
+        )
+
+    def _enforce_dashboard_guard(self) -> dict[str, Any]:
+        return http_post_json(
+            f"{self.dashboard_url}/api/defense/rules",
+            {
+                "enabled": True,
+                "block_attack_events": True,
+                "block_failsafe_overlay": True,
+                "block_protocol_alerts": True,
+                "ttl_sec": 3600,
+                "source": self.source,
+                "reason": "Response Agent playbook reinforcement",
+            },
+        )
+
+    def _enforce_uav_guard(self) -> dict[str, Any]:
+        return http_post_json(
+            f"{self.uav_defense_url}/api/defense/rules",
+            {
+                "enabled": True,
+                "block_unsafe_commands": True,
+                "block_spoofed_heartbeat": True,
+                "allowed_sys_ids": self.context.policy.get("allowed_sys_ids", [255]),
+                "restricted_commands": self.context.policy.get("restricted_commands", []),
+                "ttl_sec": 3600,
+                "source": self.source,
+                "reason": "Response Agent command trust reinforcement",
+            },
+        )
 
     @staticmethod
     def _message_for(playbook: str, threat: Threat) -> str:
