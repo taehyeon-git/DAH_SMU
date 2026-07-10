@@ -34,10 +34,10 @@ docker compose up -d --build
 ┌──────────────────────────── UAV / UGV Asset Layer ────────────────────────────┐
 │                                                                               │
 │  ┌────────────────────── UAV Simulator ──────────────────────┐  ┌───────────┐ │
-│  │ dah-uav / UAV-001                                          │  │ dah-ugv   │ │
-│  │ - MAVLink telemetry 송신 → dah-companion:14550             │  │ UGV-001   │ │
-│  │ - COMMAND_LONG 수신 ← UDP:14551                            │  │ - JSON    │ │
-│  │ - heartbeat timeout / link loss 기반 fail-safe 모사         │  │   telemetry│ │
+│  │ dah-uav / UAV-001                                         │  │ dah-ugv   │ │
+│  │ - MAVLink telemetry 송신 → dah-companion:14550            │  │ UGV-001   │ │
+│  │ - COMMAND_LONG 수신 ← UDP:14551                           │  │ - JSON    │ │
+│  │ - heartbeat timeout / link loss 기반 fail-safe 모사        │ │   telemetr │ │
 │  └──────────────────────┬────────────────────────────────────┘  │   → Router │ │
 │                         │                                       │   :14660   │ │
 │                         │                                       │ - command  │ │
@@ -51,7 +51,7 @@ docker compose up -d --build
 ┌──────────────────────────── Onboard Companion Layer ──────────────────────────┐
 │                                                                               │
 │  ┌────────────────────── Companion Computer ──────────────────────┐           │
-│  │ dah-companion / 172.31.50.30                                    │           │
+│  │ dah-companion / 172.31.50.30                                   │           │
 │  │ - MAVLink 수신 :14550                                           │           │
 │  │ - MAVLink → JSON 변환                                           │           │
 │  │ - GCS로 JSON telemetry 송신 → dah-gcs:14555                     │           │
@@ -64,28 +64,28 @@ docker compose up -d --build
 
 ┌──────────────────────────── Ground Gateway / GCS Layer ───────────────────────┐
 │                                                                               │
-│  ┌────────────────────── Ground Control Station ───────────────────┐           │
-│  │ dah-gcs                                                          │           │
-│  │ - Companion telemetry 수신 :14555                                │           │
-│  │ - Dashboard fan-out → dah-dashboard:14571                        │           │
-│  │ - Collector fan-out → telemetry-collector:14541                  │           │
-│  │ - Tactical relay → tactical-router:14560                         │           │
-│  │ - Upper C2 command 수신 ← Router:14562                           │           │
-│  │ - Companion command 전달 → dah-companion:14552                   │           │
-│  └──────────────────────────────┬──────────────────────────────────┘           │
-└─────────────────────────────────┼──────────────────────────────────────────────┘
+│  ┌────────────────────── Ground Control Station ───────────────────┐          │
+│  │ dah-gcs                                                          │         │
+│  │ - Companion telemetry 수신 :14555                                │         │
+│  │ - Dashboard fan-out → dah-dashboard:14571                        │         │
+│  │ - Collector fan-out → telemetry-collector:14541                  │         │
+│  │ - Tactical relay → tactical-router:14560                         │         │
+│  │ - Upper C2 command 수신 ← Router:14562                           │         │
+│  │ - Companion command 전달 → dah-companion:14552                   │         │
+│  └──────────────────────────────┬──────────────────────────────────┘          │
+└─────────────────────────────────┼─────────────────────────────────────────────┘
                                   │ tactical relay :14560
                                   ▼
 
 ┌──────────────────── Virtual Tactical Router / TMMR / TICN Layer ──────────────┐
-│ dah-tactical-router                                                            │
-│ - GCS 전술 릴레이 수신 :14560                                                   │
-│ - UGV telemetry 수신 :14660                                                     │
-│ - Upper C2 command 수신 :14546 → GCS:14562로 하달                               │
-│ - Router situation report → mission-control:14545                               │
-│ - Dashboard fan-out → dah-dashboard:14571                                       │
-│ - HTTP status/API :8084                                                         │
-│ - EW/JAM lab event 수신 UDP :14590                                              │
+│ dah-tactical-router                                                           │
+│ - GCS 전술 릴레이 수신 :14560                                                  │
+│ - UGV telemetry 수신 :14660                                                   │
+│ - Upper C2 command 수신 :14546 → GCS:14562로 하달                              │
+│ - Router situation report → mission-control:14545                             │
+│ - Dashboard fan-out → dah-dashboard:14571                                     │
+│ - HTTP status/API :8084                                                      │
+│ - EW/JAM lab event 수신 UDP :14590                                            │
 │ - TMMR/TICN은 별도 컨테이너가 아니라 tactical_router/ticn 내부 시뮬레이션        │
 └──────────────────────────────┬────────────────────────────────────────────────┘
                                │ Report / Situation Data ↓
@@ -93,17 +93,17 @@ docker compose up -d --build
                                ▼
 
 ┌──────────────────────────── Upper C2 / BMS Layer ─────────────────────────────┐
-│ mission-control                                                                │
+│ mission-control                                                               │
 │ - Router 경유 전술 상황 수신 ← :14545                                          │
 │ - 작전 명령 하달 → tactical-router:14546                                       │
 │ - UAV 직접 명령 없음: Router → GCS → Companion → UAV 경유                      │
 └───────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────── Dashboard / Evidence Layer ───────────────────────┐
-│ dah-dashboard + dah-gateway                                                    │
+│ dah-dashboard + dah-gateway                                                   │
 │ - 외부 진입점: http://localhost:9000                                           │
-│ - GCS/Router UDP fan-out 수신 :14571                                           │
-│ - 지도, 임무 상태, 링크 상태, ATK/DEF 이벤트 로그 표시                         │
+│ - GCS/Router UDP fan-out 수신 :14571                                          │
+│ - 지도, 임무 상태, 링크 상태, ATK/DEF 이벤트 로그 표시                           │
 │ - 운용자 직접 명령 및 GCS heartbeat → UAV:14551                                │
 └───────────────────────────────────────────────────────────────────────────────┘
 
